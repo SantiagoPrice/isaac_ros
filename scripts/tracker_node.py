@@ -103,12 +103,14 @@ class TrackerNode(Node):
                 yolo_result_msg.masks = self.create_segmentation_masks(results)
             self.results_pub.publish(yolo_result_msg)
             self.result_image_pub.publish(yolo_result_image_msg)
+            # self.get_logger().info(f"Number of results: {len(yolo_result_msg.detections)}")
 
     def create_detections_array(self, results):
         detections_msg = Detection2DArray()
         bounding_box = results[0].boxes.xywh
         classes = results[0].boxes.cls
         confidence_score = results[0].boxes.conf
+        detection_count = 0
         for bbox, cls, conf in zip(bounding_box, classes, confidence_score):
             detection = Detection2D()
             detection.bbox.center.position.x = float(bbox[0])
@@ -120,6 +122,9 @@ class TrackerNode(Node):
             hypothesis.hypothesis.score = float(conf)
             detection.results.append(hypothesis)
             detections_msg.detections.append(detection)
+            detection_count += 1  # Increment the counter for each detection result
+        # print(f"Number of detection.results: {detection_count}")
+        self.get_logger().info(f"Number of results for this detection: {detection_count}")
         return detections_msg
 
     def create_result_image(self, results):

@@ -35,7 +35,8 @@ TrackerWithCloudNode::TrackerWithCloudNode() : rclcpp::Node("tracker_with_cloud_
   camera_info_sub_.subscribe(this, camera_info_topic_);
   lidar_sub_.subscribe(this, lidar_topic_);
   yolo_result_sub_.subscribe(this, yolo_result_topic_);
-  sync_ = std::make_shared<message_filters::Synchronizer<ApproximateSyncPolicy>>(1);
+  sync_ = std::make_shared<message_filters::Synchronizer<ApproximateSyncPolicy>>(ApproximateSyncPolicy(50));
+  
   sync_->connectInput(camera_info_sub_, lidar_sub_, yolo_result_sub_);
   sync_->registerCallback(std::bind(&TrackerWithCloudNode::syncCallback, this, std::placeholders::_1,
                                     std::placeholders::_2, std::placeholders::_3));
@@ -77,6 +78,8 @@ void TrackerWithCloudNode::syncCallback(const sensor_msgs::msg::CameraInfo::Cons
   detection3d_pub_->publish(detection3d_array_msg);
   detection_cloud_pub_->publish(detection_cloud_msg);
   marker_pub_->publish(marker_array_msg);
+
+  RCLCPP_INFO(this->get_logger(), "syncCallback");
 }
 
 void TrackerWithCloudNode::transformPointCloud(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud_in,
@@ -108,6 +111,9 @@ void TrackerWithCloudNode::projectCloud(const pcl::PointCloud<pcl::PointXYZ>::Pt
   detection3d_array_msg.header = header;
   detection3d_array_msg.header.stamp = yolo_result_msg->header.stamp;
 
+  RCLCPP_INFO(this->get_logger(), "Number of detections: %zu", yolo_result_msg->detections.detections.size());
+  int bounding_box_count = 0;
+
   for (size_t i = 0; i < yolo_result_msg->detections.detections.size(); i++)
   {
     pcl::PointCloud<pcl::PointXYZ>::Ptr detection_cloud_raw(new pcl::PointCloud<pcl::PointXYZ>());
@@ -133,9 +139,13 @@ void TrackerWithCloudNode::projectCloud(const pcl::PointCloud<pcl::PointXYZ>::Pt
 
       createBoundingBox(detection3d_array_msg, closest_detection_cloud,
                         yolo_result_msg->detections.detections[i].results);
+      
+      bounding_box_count++;
     }
   }
-
+  // RCLCPP_INFO(this->get_logger(), "Number of BoundingBoxes created: %d", bounding_box_count);
+  RCLCPP_INFO(this->get_logger(), "Number of BoundingBoxes created: %zu", detection3d_array_msg.detections.size());
+  
   pcl::toROSMsg(*combine_detection_cloud, combine_detection_cloud_msg);
   combine_detection_cloud_msg.header = header;
 }
