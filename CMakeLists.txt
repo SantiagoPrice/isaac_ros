@@ -63,7 +63,17 @@ install(TARGETS
 )
 
 install(PROGRAMS
-  script/tracker_node.py
+  scripts/tracker_with_cloud_node.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+install(PROGRAMS
+  scripts/tracker_with_cloud_node_faster.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+install(PROGRAMS
+  scripts/tracker_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
