@@ -35,7 +35,7 @@ TrackerWithCloudNode::TrackerWithCloudNode() : rclcpp::Node("tracker_with_cloud_
   camera_info_sub_.subscribe(this, camera_info_topic_);
   lidar_sub_.subscribe(this, lidar_topic_);
   yolo_result_sub_.subscribe(this, yolo_result_topic_);
-  sync_ = std::make_shared<message_filters::Synchronizer<ApproximateSyncPolicy>>(ApproximateSyncPolicy(50));
+  sync_ = std::make_shared<message_filters::Synchronizer<ApproximateSyncPolicy>>(ApproximateSyncPolicy(500));
   
   sync_->connectInput(camera_info_sub_, lidar_sub_, yolo_result_sub_);
   sync_->registerCallback(std::bind(&TrackerWithCloudNode::syncCallback, this, std::placeholders::_1,
@@ -45,6 +45,8 @@ TrackerWithCloudNode::TrackerWithCloudNode() : rclcpp::Node("tracker_with_cloud_
   detection3d_pub_ = this->create_publisher<vision_msgs::msg::Detection3DArray>(yolo_3d_result_topic_, 1);
   detection_cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("detection_cloud", 1);
   marker_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("detection_marker", 1);
+
+  plane_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("detected_plane_cloud", 1);
 
   last_call_time_ = this->now();
   tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
@@ -108,6 +110,7 @@ void TrackerWithCloudNode::projectCloud(const pcl::PointCloud<pcl::PointXYZ>::Pt
                                         sensor_msgs::msg::PointCloud2& combine_detection_cloud_msg)
 {
   pcl::PointCloud<pcl::PointXYZ>::Ptr combine_detection_cloud(new pcl::PointCloud<pcl::PointXYZ>());
+  pcl::PointCloud<pcl::PointXYZ>::Ptr combined_plane_cloud(new pcl::PointCloud<pcl::PointXYZ>());
   detection3d_array_msg.header = header;
   detection3d_array_msg.header.stamp = yolo_result_msg->header.stamp;
 
@@ -136,6 +139,38 @@ void TrackerWithCloudNode::projectCloud(const pcl::PointCloud<pcl::PointXYZ>::Pt
       pcl::PointCloud<pcl::PointXYZ>::Ptr closest_detection_cloud(new pcl::PointCloud<pcl::PointXYZ>());
       closest_detection_cloud = euclideanClusterExtraction(detection_cloud);
       *combine_detection_cloud += *closest_detection_cloud;
+
+      // // Perform RANSAC plane detection
+      // pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients());
+      // pcl::PointIndices::Ptr inliers(new pcl::PointIndices());
+      // pcl::SACSegmentation<pcl::PointXYZ> seg;
+      // seg.setOptimizeCoefficients(true);
+      // seg.setModelType(pcl::SACMODEL_PLANE);
+      // seg.setMethodType(pcl::SAC_RANSAC);
+      // seg.setDistanceThreshold(0.01);
+      // seg.setInputCloud(closest_detection_cloud);
+      // seg.segment(*inliers, *coefficients);
+
+      // if (inliers->indices.size() > 0)
+      // {
+      //   RCLCPP_INFO(this->get_logger(), "Plane detected with %zu inliers", inliers->indices.size());
+
+      //   // Extract plane points
+      //   pcl::PointCloud<pcl::PointXYZ>::Ptr plane_cloud(new pcl::PointCloud<pcl::PointXYZ>());
+      //   pcl::ExtractIndices<pcl::PointXYZ> extract;
+      //   extract.setInputCloud(closest_detection_cloud);
+      //   extract.setIndices(inliers);
+      //   extract.setNegative(false);
+      //   extract.filter(*plane_cloud);
+
+      //   *combined_plane_cloud += *plane_cloud;
+
+      //   // Publish the plane points as a new topic
+      //   sensor_msgs::msg::PointCloud2 plane_cloud_msg;
+      //   pcl::toROSMsg(*combined_plane_cloud, plane_cloud_msg);
+      //   plane_cloud_msg.header = header;
+      //   plane_pub_->publish(plane_cloud_msg);
+      // }
 
       createBoundingBox(detection3d_array_msg, closest_detection_cloud,
                         yolo_result_msg->detections.detections[i].results);
@@ -204,6 +239,7 @@ void TrackerWithCloudNode::createBoundingBox(
     vision_msgs::msg::Detection3DArray& detection3d_array_msg, const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
     const std::vector<vision_msgs::msg::ObjectHypothesisWithPose>& detections_results_msg)
 {
+  RCLCPP_INFO(this->get_logger(), "createBoundingBox");
   Eigen::Vector4f centroid;
   pcl::compute3DCentroid(*cloud, centroid);
   double theta = -atan2(centroid[1], sqrt(pow(centroid[0], 2) + pow(centroid[2], 2)));

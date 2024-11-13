@@ -3,7 +3,8 @@
   <arg name="use_sim_time" default="true"/>
   <arg name="debug" default="true"/>
   <arg name="yolo_model" default="yolov8m-seg.pt"/>
-  <arg name="input_topic" default="/kitti/camera_color_left/image_raw"/>
+  <!-- <arg name="input_topic" default="/kitti/camera_color_left/image_raw"/> -->
+  <arg name="input_topic" default="/camera/color/image_raw"/>
   <arg name="result_topic" default="/yolo_result"/>
   <arg name="result_image_topic" default="/yolo_image"/>
   <arg name="conf_thres" default="0.25"/>
@@ -18,12 +19,18 @@
   <arg name="result_labels" default="true"/>
   <arg name="result_boxes" default="true"/>
 
-  <arg name="camera_info_topic" default="/kitti/camera_color_left/camera_info"/>
-  <arg name="lidar_topic" default="/kitti/velo/pointcloud"/>
+  <!-- <arg name="camera_info_topic" default="/kitti/camera_color_left/camera_info"/> -->
+  <arg name="camera_info_topic" default="/camera/color/camera_info"/>
+  <!-- <arg name="lidar_topic" default="/kitti/velo/pointcloud"/> -->
+  <arg name="lidar_topic" default="/lidar_filtered"/>
   <arg name="yolo_3d_result_topic" default="/yolo_3d_result"/>
-  <arg name="cluster_tolerance" default="0.3"/>
+  <!-- <arg name="cluster_tolerance" default="0.3"/>
   <arg name="voxel_leaf_size" default="0.1"/>
   <arg name="min_cluster_size" default="100"/>
+  <arg name="max_cluster_size" default="10000"/> -->
+  <arg name="cluster_tolerance" default="0.3"/>
+  <arg name="voxel_leaf_size" default="1.0"/>
+  <arg name="min_cluster_size" default="20"/>
   <arg name="max_cluster_size" default="10000"/>
 
   <set_parameter name="use_sim_time" value="$(var use_sim_time)"/>

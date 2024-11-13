@@ -28,6 +28,8 @@ find_package(PCL REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/YoloResult.msg"
+  "msg/LocationArray.msg"
+  "msg/DesiredLocation.msg"
   DEPENDENCIES
   sensor_msgs
   std_msgs

@@ -4,7 +4,8 @@
   <arg name="debug" default="true"/>
 
   <!-- <arg name="camera_info_topic" default="/kitti/camera_color_left/camera_info"/> -->
-  <arg name="camera_info_topic" default="/camera/color/camera_info"/>
+  <!-- <arg name="camera_info_topic" default="/camera/camera/color/camera_info"/> -->
+  <arg name="camera_info_topic" default="/yolov8_encoder/resize/camera_info"/>
   <!-- <arg name="lidar_topic" default="/kitti/velo/pointcloud"/> -->
   <arg name="lidar_topic" default="/lidar_filtered"/>
   <arg name="yolo_3d_result_topic" default="/yolo_3d_result"/>

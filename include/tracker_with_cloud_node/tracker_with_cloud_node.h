@@ -51,6 +51,9 @@
 #include <pcl/search/kdtree.h>
 #include <pcl/segmentation/extract_clusters.h>
 
+#include <pcl/filters/extract_indices.h>
+#include <pcl/segmentation/sac_segmentation.h>
+
 typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::msg::CameraInfo, sensor_msgs::msg::PointCloud2,
                                                         ultralytics_ros::msg::YoloResult>
     ApproximateSyncPolicy;
@@ -62,6 +65,7 @@ private:
   rclcpp::Publisher<vision_msgs::msg::Detection3DArray>::SharedPtr detection3d_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr detection_cloud_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr plane_pub_;
   image_geometry::PinholeCameraModel cam_model_;
   message_filters::Subscriber<sensor_msgs::msg::CameraInfo> camera_info_sub_;
   message_filters::Subscriber<sensor_msgs::msg::PointCloud2> lidar_sub_;

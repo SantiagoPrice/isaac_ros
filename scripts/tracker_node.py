@@ -103,7 +103,7 @@ class TrackerNode(Node):
                 yolo_result_msg.masks = self.create_segmentation_masks(results)
             self.results_pub.publish(yolo_result_msg)
             self.result_image_pub.publish(yolo_result_image_msg)
-            # self.get_logger().info(f"Number of results: {len(yolo_result_msg.detections)}")
+          # self.get_logger().info(f"Number of results: {len(yolo_result_msg.detections)}")
 
     def create_detections_array(self, results):
         detections_msg = Detection2DArray()
