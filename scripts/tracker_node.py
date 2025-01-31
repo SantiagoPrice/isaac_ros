@@ -31,8 +31,8 @@ from ultralytics_ros.msg import YoloResult
 class TrackerNode(Node):
     def __init__(self):
         super().__init__("tracker_node")
-        self.declare_parameter("yolo_model", "yolov8n.pt")
-        self.declare_parameter("input_topic", "image_raw")
+        self.declare_parameter("yolo_model", "yolo11s-seg.pt")
+        self.declare_parameter("input_topic", "image_rect")
         self.declare_parameter("result_topic", "yolo_result")
         self.declare_parameter("result_image_topic", "yolo_image")
         self.declare_parameter("conf_thres", 0.25)
@@ -48,9 +48,14 @@ class TrackerNode(Node):
         self.declare_parameter("result_labels", True)
         self.declare_parameter("result_boxes", True)
 
-        path = get_package_share_directory("ultralytics_ros")
+        # path = get_package_share_directory("ultralytics_ros")
+        # yolo_model = self.get_parameter("yolo_model").get_parameter_value().string_value
+        # self.model = YOLO(f"{path}/models/{yolo_model}")
+        # self.model.fuse()
+
+        path = "/workspaces/isaac_ros-dev/isaac_ros_assets"
         yolo_model = self.get_parameter("yolo_model").get_parameter_value().string_value
-        self.model = YOLO(f"{path}/models/{yolo_model}")
+        self.model = YOLO(f"{path}/models/yolo11/{yolo_model}")
         self.model.fuse()
 
         self.bridge = cv_bridge.CvBridge()

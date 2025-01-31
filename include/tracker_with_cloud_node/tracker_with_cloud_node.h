@@ -81,6 +81,10 @@ private:
   float voxel_leaf_size_;
   int min_cluster_size_;
   int max_cluster_size_;
+  std::deque<std::pair<rclcpp::Time, pcl::PointCloud<pcl::PointXYZ>::Ptr>> plane_buffer_;
+  rclcpp::Duration plane_memory_duration_{1, 0}; // 1 second
+  void publishCombinedPlane(const rclcpp::Time &stamp, const std_msgs::msg::Header &header);
+
 
 public:
   TrackerWithCloudNode();
@@ -96,13 +100,14 @@ public:
   void processPointsWithBbox(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
                              const vision_msgs::msg::Detection2D& detection2d_msg,
                              pcl::PointCloud<pcl::PointXYZ>::Ptr& detection_cloud_raw);
-  void processPointsWithMask(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
-                             const sensor_msgs::msg::Image& mask_image_msg,
-                             pcl::PointCloud<pcl::PointXYZ>::Ptr& detection_cloud_raw);
+  void processPointsWithMask(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,const sensor_msgs::msg::Image& mask_image_msg,size_t detection_index,pcl::PointCloud<pcl::PointXYZ>::Ptr& detection_cloud_raw
+);
   void createBoundingBox(vision_msgs::msg::Detection3DArray& detection3d_array_msg,
                          const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
                          const std::vector<vision_msgs::msg::ObjectHypothesisWithPose>& detections_results_msg);
   pcl::PointCloud<pcl::PointXYZ>::Ptr downsampleCloudMsg(const sensor_msgs::msg::PointCloud2::ConstSharedPtr& cloud_msg);
+  bool waitForTransform(const std::string &target_frame, const std::string &source_frame, const rclcpp::Time &time, const rclcpp::Duration &timeout);
+
   pcl::PointCloud<pcl::PointXYZ>::Ptr cloud2TransformedCloud(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
                                                              const std::string& source_frame,
                                                              const std::string& target_frame,

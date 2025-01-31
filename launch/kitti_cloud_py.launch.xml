@@ -5,12 +5,12 @@
 
   <!-- <arg name="camera_info_topic" default="/kitti/camera_color_left/camera_info"/> -->
   <!-- <arg name="camera_info_topic" default="/camera/camera/color/camera_info"/> -->
-  <arg name="camera_info_topic" default="/yolov8_encoder/resize/camera_info"/>
+  <arg name="camera_info_topic" default="/yolo11_seg_encoder/resize/camera_info"/>
   <!-- <arg name="lidar_topic" default="/kitti/velo/pointcloud"/> -->
   <arg name="lidar_topic" default="/lidar_filtered"/>
   <arg name="yolo_3d_result_topic" default="/yolo_3d_result"/>
   <arg name="cluster_tolerance" default="0.3"/>
-  <arg name="voxel_leaf_size" default="1.0"/>
+  <arg name="voxel_leaf_size" default="0.05"/>
   <arg name="min_cluster_size" default="20"/>
   <arg name="max_cluster_size" default="10000"/>
 
@@ -18,7 +18,7 @@
 
   <set_parameter name="use_sim_time" value="$(var use_sim_time)"/>
 
-  <node pkg="ultralytics_ros" exec="tracker_with_cloud_node.py" output="screen">
+  <node pkg="ultralytics_ros" exec="tracker_with_cloud_node" output="screen">
     <param name="camera_info_topic" value="$(var camera_info_topic)"/>
     <param name="lidar_topic" value="$(var lidar_topic)"/>
     <param name="yolo_result_topic" value="$(var result_topic)"/>
