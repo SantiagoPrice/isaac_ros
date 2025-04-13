@@ -1,12 +1,19 @@
+// replace visual servoing with intermedium docking pose for the 2nd phase
+// replace center of line intermedium docking pose with optimal docking pose on a circle for the 2nd phase
+// simply change between 59 to 60 for bed or table
 #include "tracker_with_cloud_node/tracker_with_cloud_node.h"
 #include <pcl/common/transforms.h>
 #include <deque>
 #include <utility>    // std::pair
+#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
+#include <tf2_ros/transform_listener.h>
+#include <tf2_ros/buffer.h>
+#include <tf2/LinearMath/Quaternion.h>
 
 TrackerWithCloudNode::TrackerWithCloudNode() 
   : rclcpp::Node("tracker_with_cloud_node"),
     // plane_memory_duration_(1, 0) // store planes for 1 second
-    plane_memory_duration_{rclcpp::Duration::from_seconds(0.4)}
+    plane_memory_duration_{rclcpp::Duration::from_seconds(0.6)}
 
 {
   // ---------------------------
@@ -53,6 +60,14 @@ TrackerWithCloudNode::TrackerWithCloudNode()
   marker_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(
                   "detection_marker", 1);
   plane_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("plane_cloud", 1);
+  goal_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
+      "/rviz_goal",   // or your chosen topic name
+      10             // queue size
+  );
+  visual_servo_pub_ = this->create_publisher<geometry_msgs::msg::Twist>(
+    "/cmd_vel", 
+    10
+  );
 
   last_call_time_ = this->now();
 
@@ -128,7 +143,7 @@ void TrackerWithCloudNode::projectCloud(
     bool is_class_60 = false;
     for (const auto &r : yolo_result_msg->detections.detections[i].results)
     {
-      if (r.hypothesis.class_id == "60") {
+      if (r.hypothesis.class_id == "59") {
         is_class_60 = true;
         break;
       }
@@ -137,6 +152,7 @@ void TrackerWithCloudNode::projectCloud(
       // skip if not class 60
       continue;
     }
+
 
     // Gather points
     pcl::PointCloud<pcl::PointXYZ>::Ptr detection_cloud_raw(new pcl::PointCloud<pcl::PointXYZ>());
@@ -199,15 +215,141 @@ void TrackerWithCloudNode::projectCloud(
         extract.setIndices(inliers);
         extract.filter(*plane_cloud);
 
-        // store plane
-        rclcpp::Time now_t = this->now();
-        plane_buffer_.push_back({now_t, plane_cloud});
-        // remove older than 1s
-        while (!plane_buffer_.empty() && (now_t - plane_buffer_.front().first) > plane_memory_duration_) {
-          plane_buffer_.pop_front();
-        }
-        // re-publish combined
-        publishCombinedPlane(now_t, header);
+        // 5) Compute centroid of the plane in "header.frame_id"
+        Eigen::Vector4f centroid;
+        pcl::compute3DCentroid(*plane_cloud, centroid);
+
+        // 6) Transform the centroid -> map frame (or whichever global frame you want)
+        geometry_msgs::msg::Point plane_center_local;
+        plane_center_local.x = centroid[0];
+        plane_center_local.y = centroid[1];
+        plane_center_local.z = centroid[2];
+
+        last_plane_center_map_ = plane_center_local;
+        // Mark that we do have a plane center
+        geometry_msgs::msg::Point center_in_base;
+        bool tf_ok = transformPointFrameToFrame(last_plane_center_map_, center_in_base, "hesai_lidar", "base_link");
+        float dx = center_in_base.x;
+        float dy = center_in_base.y;
+        float dz = center_in_base.z;
+        float dist_plane = std::sqrt(dx*dx + dy*dy);
+        RCLCPP_INFO(this->get_logger(),
+                        "plane distance %.2f", dist_plane);
+
+        have_plane_center_ = true;
+        // updateVisualServo(yolo_result_msg->detections.detections[i]);
+
+        float image_width  = static_cast<float>(cam_model_.fullResolution().width);
+        float image_height = static_cast<float>(cam_model_.fullResolution().height);
+        float edge_threshold_px = 20.0f;  // example threshold
+
+        const auto & detection2d_msg = yolo_result_msg->detections.detections[i];
+        bool near_edge = isBboxNearEdge(detection2d_msg, image_width, image_height, edge_threshold_px);
+
+        // ------------------------------------------------
+        // (B) Decide whether to store the plane
+        // ------------------------------------------------
+        // Condition = near edge OR dist < 4
+        bool condition = (dist_plane > 3.0f);
+        // bool condition_2 = (near_edge || dist_plane < 2.0f);
+        bool condition_2 = (near_edge || dist_plane < 2.0f);
+
+        // 3) Get the robot pose (base_link) in map frame
+        // if (condition)
+        // {
+        //   geometry_msgs::msg::TransformStamped base_link_map_tf;
+        //   try
+        //   {
+        //     // We want the transform FROM base_link TO map (or the other way around),
+        //     // so we can figure out the robot's position in map frame. Typically, we do:
+        //     //    lookupTransform("map", "base_link", ... )
+        //     // that means: "Give me a transform that transforms points from base_link -> map."
+        //     base_link_map_tf = tf_buffer_->lookupTransform("map", "base_link",
+        //                                                   tf2::TimePointZero);
+        //   }
+        //   catch (tf2::TransformException &ex)
+        //   {
+        //     RCLCPP_WARN(this->get_logger(), "Could not get base_link->map transform: %s", ex.what());
+        //     return;
+        //   }
+
+        //   // Extract robot position (rx, ry, rz) in map frame
+        //   double rx = base_link_map_tf.transform.translation.x;
+        //   double ry = base_link_map_tf.transform.translation.y;
+        //   double rz = base_link_map_tf.transform.translation.z;
+
+        //   // 4) Distance and direction from robot -> plane center
+        //   geometry_msgs::msg::Point plane_center_map;
+        //   bool tf_ok = transformPointFrameToFrame(plane_center_local, plane_center_map, "hesai_lidar", "map");
+        //   double px = plane_center_map.x;
+        //   double py = plane_center_map.y;
+        //   double pz = plane_center_map.z;
+
+        //   double dx = px - rx;
+        //   double dy = py - ry;
+        //   double dz = pz - rz;
+        //   double dist_plane = std::sqrt(dx*dx + dy*dy);
+
+        //   RCLCPP_INFO(this->get_logger(), "Distance to plane center (map frame): %.2f m", dist_plane);
+        //   RCLCPP_INFO(this->get_logger(), "px py pz %.2f,  %.2f, %.2f",plane_center_map.x, plane_center_map.y, plane_center_map.z);
+        //   RCLCPP_INFO(this->get_logger(), "rx ry rz %.2f,  %.2f, %.2f",rx, ry, rz);
+
+        //   if (dist_plane < 1e-3) {
+        //     RCLCPP_WARN(this->get_logger(),
+        //                 "Plane center is essentially at the robot position; skipping goal calc.");
+        //     return;
+        //   }
+
+        //   // 5) Compute the goal pose 2.5 m away from plane center (map frame)
+        //   double offset = 2.5; // 2.5 m away from the plane
+        //   // Unit direction from robot to plane
+        //   double ux = dx / dist_plane;
+        //   double uy = dy / dist_plane;
+        //   double uz = dz / dist_plane;
+
+        //   geometry_msgs::msg::PoseStamped goal_pose;
+        //   goal_pose.header.stamp = this->now();
+        //   goal_pose.header.frame_id = "map";
+
+        //   // Position: plane center minus offset in the direction from robot->plane
+        //   goal_pose.pose.position.x = px - offset * ux;
+        //   goal_pose.pose.position.y = py - offset * uy;
+        //   goal_pose.pose.position.z = pz - offset * uz;
+
+        //   // Orientation: face the plane in XY-plane (simple yaw for ground robot)
+        //   double yaw = std::atan2((py - goal_pose.pose.position.y),
+        //                           (px - goal_pose.pose.position.x));
+        //   tf2::Quaternion q;
+        //   q.setRPY(0.0, 0.0, yaw);
+        //   goal_pose.pose.orientation = tf2::toMsg(q);
+
+        //   // 6) Publish the goal
+        //   goal_pose_pub_->publish(goal_pose);
+
+        //   RCLCPP_INFO(this->get_logger(),
+        //               "Published goal in map frame, 2.5 m from plane center.");
+        // }
+        // else
+        // {
+          if (!condition_2)
+          {// servo_done_ == true => we no longer do servo, but we keep storing plane
+          rclcpp::Time now_t = this->now();
+          plane_buffer_.push_back({now_t, plane_cloud});
+          while (!plane_buffer_.empty() &&
+                (now_t - plane_buffer_.front().first) > plane_memory_duration_) {
+            plane_buffer_.pop_front();
+          }
+          publishCombinedPlane(now_t, header);
+
+          RCLCPP_INFO(this->get_logger(),
+                      "servo_done_=true => ignoring servo, always storing plane now");
+          }
+          else
+          {
+            RCLCPP_INFO(this->get_logger(),
+                      "get too close to the table, skip storing plane.");
+          }
+        // }
       }
 
       // create bounding box in 3D
@@ -223,6 +365,227 @@ void TrackerWithCloudNode::projectCloud(
   pcl::PointCloud<pcl::PointXYZ> empty_cloud;
   pcl::toROSMsg(empty_cloud, combine_detection_cloud_msg);
   combine_detection_cloud_msg.header = header;
+}
+
+void TrackerWithCloudNode::updateVisualServo(const vision_msgs::msg::Detection2D &detection2d_msg)
+{
+  // 1) Retrieve bounding box info + image size
+  float image_width  = static_cast<float>(cam_model_.fullResolution().width);
+  float image_height = static_cast<float>(cam_model_.fullResolution().height);
+  if (image_width <= 0.0f || image_height <= 0.0f) {
+    RCLCPP_WARN(this->get_logger(), "No valid camera info => cannot do servo");
+    return;
+  }
+
+  float cx = detection2d_msg.bbox.center.position.x;
+  float cy = detection2d_msg.bbox.center.position.y;
+  float w  = detection2d_msg.bbox.size_x;
+  float h  = detection2d_msg.bbox.size_y;
+
+  float left   = cx - w * 0.5f;
+  float right  = cx + w * 0.5f;
+  float top    = cy - h * 0.5f;
+  float bottom = cy + h * 0.5f;
+
+  float dist_left  = left;                   // distance from left image border
+  float dist_right = image_width  - right;   // distance from right border
+  float dist_top   = top;                    // distance from top border
+  float dist_down  = image_height - bottom;  // distance from bottom border
+
+  float edge_threshold = 20.0f;  // px
+  bool near_left  = (dist_left  < edge_threshold);
+  bool near_right = (dist_right < edge_threshold);
+  bool near_top   = (dist_top   < edge_threshold);
+  bool near_down  = (dist_down  < edge_threshold);
+
+  // 2) Prepare a Twist
+  geometry_msgs::msg::Twist cmd;
+  cmd.linear.x  = 0.0f;
+  cmd.angular.z = 0.0f;
+
+  // Gains and speeds
+  float rot_speed     = 0.17f;   // rad/s for simple in-place rotation
+  float linear_speed  = 0.1f;   // m/s for in-place forward/back
+
+  // 3) Priority: edges
+  if (near_left)
+  {
+    // Turn left in place
+    cmd.angular.z = +rot_speed;
+  }
+  else if (near_right)
+  {
+    // Turn right in place
+    cmd.angular.z = -rot_speed;
+  }
+  else if (near_top)
+  {
+    // If near top => move backward
+    cmd.linear.x = -linear_speed;
+  }
+  else if (near_down)
+  {
+    // If near bottom => move forward
+    cmd.linear.x = +linear_speed;
+  }
+  else
+  {
+    // 4) No edges near => check distance to plane center
+    if (!have_plane_center_) {
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                           "No plane center => cannot approach table");
+    }
+    else {
+      geometry_msgs::msg::Point center_in_base;
+      bool tf_ok = transformPointFrameToFrame(last_plane_center_map_, center_in_base, "hesai_lidar", "base_link");
+      if (!tf_ok) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                             "TF map->base_link not available => skip forward");
+      }
+      else {
+        float dx = center_in_base.x;
+        float dy = center_in_base.y;
+        float dz = center_in_base.z;
+        float dist_plane = std::sqrt(dx*dx + dy*dy + dz*dz);
+
+        float desired_dist = 2.0f;  // we want to stop if within 4 m
+        if (dist_plane > desired_dist)
+        {
+          // (A) Combined rotation + forward:
+          //  We'll rotate toward (dx,dy) and move forward to reduce distance.
+          //  heading_err = atan2(dy, dx) => 0 means pointing directly at table.
+          float heading_err = std::atan2(dy, dx);
+
+          // A small P-control on heading:
+          float heading_gain = 0.5f;  // tune
+          float ang_cmd = heading_gain * heading_err;
+          // saturate
+          float max_rot = 0.5f; 
+          if (ang_cmd >  max_rot)  ang_cmd =  max_rot;
+          if (ang_cmd < -max_rot)  ang_cmd = -max_rot;
+
+          // Forward speed
+          float forward_err = dist_plane - desired_dist;
+          float forward_gain = 0.2f;
+          float fwd_cmd = forward_gain * forward_err;
+          // saturate
+          float max_fwd = 0.3f;
+          if (fwd_cmd >  max_fwd) fwd_cmd =  max_fwd;
+          if (fwd_cmd < -max_fwd) fwd_cmd = -max_fwd;
+
+          cmd.linear.x  = fwd_cmd;
+          cmd.angular.z = ang_cmd;
+        }
+        else
+        {
+          // (B) Already within 4 m => stop
+          cmd.linear.x  = 0.0f;
+          cmd.angular.z = 0.0f;
+          RCLCPP_INFO(this->get_logger(), "Within 4 m => stopping");
+        }
+      }
+    }
+  }
+
+  // 5) Publish final cmd
+  visual_servo_pub_->publish(cmd);
+
+  RCLCPP_INFO(this->get_logger(),
+    "[updateVisualServo] near_edge=(L:%d,R:%d,T:%d,D:%d) => cmd( lin=%.2f, ang=%.2f )",
+    (near_left?1:0),(near_right?1:0),(near_top?1:0),(near_down?1:0),
+    cmd.linear.x, cmd.angular.z
+  );
+}
+
+bool TrackerWithCloudNode::transformPointFrameToFrame(
+    const geometry_msgs::msg::Point &pt_in,
+    geometry_msgs::msg::Point &pt_out,
+    const std::string &from_frame,
+    const std::string &to_frame)
+{
+  // Example: transform at the current time
+  rclcpp::Time now_t = this->now();
+  // Wait up to 2s for the transform
+  rclcpp::Duration timeout(2, 0);
+
+  bool tf_ok = waitForTransform(to_frame, from_frame, now_t, timeout);
+  if (!tf_ok)
+  {
+    RCLCPP_WARN(this->get_logger(),
+                "transformPointFrameToFrame: No TF from %s->%s after %.1f s",
+                from_frame.c_str(), to_frame.c_str(), timeout.seconds());
+    return false;
+  }
+
+  try
+  {
+    // Lookup the transform
+    geometry_msgs::msg::TransformStamped tf_stamped =
+        tf_buffer_->lookupTransform(to_frame, from_frame, now_t);
+
+    // Convert the geometry_msgs to TF2 types
+    tf2::Vector3 p(pt_in.x, pt_in.y, pt_in.z);
+    tf2::Quaternion q(tf_stamped.transform.rotation.x,
+                      tf_stamped.transform.rotation.y,
+                      tf_stamped.transform.rotation.z,
+                      tf_stamped.transform.rotation.w);
+    tf2::Vector3 t(tf_stamped.transform.translation.x,
+                   tf_stamped.transform.translation.y,
+                   tf_stamped.transform.translation.z);
+
+    tf2::Transform transform(q, t);
+
+    // Apply the transform
+    tf2::Vector3 p_new = transform * p;
+    pt_out.x = p_new.x();
+    pt_out.y = p_new.y();
+    pt_out.z = p_new.z();
+
+    return true;
+  }
+  catch (tf2::TransformException &ex)
+  {
+    RCLCPP_WARN(this->get_logger(),
+                "transformPointFrameToFrame failed: %s", ex.what());
+    return false;
+  }
+}
+
+bool TrackerWithCloudNode::isBboxNearEdge(
+  const vision_msgs::msg::Detection2D &detection2d_msg,
+  float image_width,
+  float image_height,
+  float edge_threshold)
+{
+  // Extract bounding box info
+  float cx = detection2d_msg.bbox.center.position.x;
+  float cy = detection2d_msg.bbox.center.position.y;
+  float w  = detection2d_msg.bbox.size_x;
+  float h  = detection2d_msg.bbox.size_y;
+
+  // Edges of the bbox
+  float left   = cx - w * 0.5f;
+  float right  = cx + w * 0.5f;
+  float top    = cy - h * 0.5f;
+  float bottom = cy + h * 0.5f;
+
+  // Distances from each image border
+  float dist_left  = left;
+  float dist_right = image_width - right;
+  float dist_top   = top;
+  float dist_down  = image_height - bottom;
+
+  // If any is below edge_threshold => near edge
+  // if (dist_left < edge_threshold || dist_right < edge_threshold ||
+  //     dist_top  < edge_threshold+70.0f || dist_down  < edge_threshold+70.0f)
+  if (dist_left < edge_threshold || dist_right < edge_threshold)
+  {
+    RCLCPP_INFO(this->get_logger(),
+                "Bbox is near edge: (left=%.1f, right=%.1f, top=%.1f, down=%.1f)",
+                dist_left, dist_right, dist_top, dist_down);
+    return true;
+  }
+  return false;
 }
 
 // --------------------------------------------------------------------
@@ -541,40 +904,6 @@ TrackerWithCloudNode::euclideanClusterExtraction(const pcl::PointCloud<pcl::Poin
   return closest_cluster;
 }
 
-// -------------------------------------------------------
-// Additional method: publishCombinedPlane
-// merges all plane clouds in plane_buffer_ over last 1s
-// and re-publishes on plane_pub_
-// -------------------------------------------------------
-
-// void TrackerWithCloudNode::publishCombinedPlane(const rclcpp::Time &stamp, const std_msgs::msg::Header &header)
-// {
-//   // Merge all plane clouds from plane_buffer_ into a single point cloud
-//   pcl::PointCloud<pcl::PointXYZ> combined;
-
-//   for (auto &pair : plane_buffer_) {
-//     auto &plane_ptr = pair.second;  // plane_ptr is a pcl::PointCloud<pcl::PointXYZ>::Ptr
-//     combined += *plane_ptr;         // operator+= merges points
-//   }
-
-//   if (combined.empty()) {
-//     RCLCPP_INFO(this->get_logger(), "No planes to combine in the last 1s");
-//     return;
-//   }
-
-//   sensor_msgs::msg::PointCloud2 combined_msg;
-//   pcl::toROSMsg(combined, combined_msg);
-
-//   // Use the same header for continuity
-//   combined_msg.header = header;
-
-//   // Publish on the same plane_pub_ topic
-//   plane_pub_->publish(combined_msg);
-
-//   RCLCPP_INFO(this->get_logger(),
-//               "Published combined plane from last 1s with %zu points",
-//               combined.size());
-// }
 
 void TrackerWithCloudNode::publishCombinedPlane(const rclcpp::Time &stamp,
                                                const std_msgs::msg::Header &header)

@@ -66,6 +66,7 @@ private:
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr detection_cloud_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr plane_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr goal_pose_pub_;
   image_geometry::PinholeCameraModel cam_model_;
   message_filters::Subscriber<sensor_msgs::msg::CameraInfo> camera_info_sub_;
   message_filters::Subscriber<sensor_msgs::msg::PointCloud2> lidar_sub_;
@@ -115,4 +116,19 @@ public:
   pcl::PointCloud<pcl::PointXYZ>::Ptr euclideanClusterExtraction(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud);
   visualization_msgs::msg::MarkerArray
   createMarkerArray(const vision_msgs::msg::Detection3DArray& detection3d_array_msg, const double& duration);
+  bool isBboxNearEdge(
+    const vision_msgs::msg::Detection2D &detection2d_msg,
+    float image_width,
+    float image_height,
+    float edge_threshold
+  );
+  rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr visual_servo_pub_;
+  bool have_plane_center_ = false;
+  geometry_msgs::msg::Point last_plane_center_map_;
+  void updateVisualServo(const vision_msgs::msg::Detection2D &detection2d_msg);
+  bool transformPointFrameToFrame(const geometry_msgs::msg::Point &pt_in_map,
+                               geometry_msgs::msg::Point &pt_in_base,
+                                const std::string &from_frame,
+                                const std::string &to_frame);
+  bool servo_done_ = false;  // initially false => servo can happen
 };
