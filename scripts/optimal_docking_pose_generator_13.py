@@ -1,5 +1,6 @@
 # request multi goals and recieve a response multi costs, then add near_goal_costs
 # generate circle for 2nd phase
+# generate pose for table
 
 #!/usr/bin/env python3
 

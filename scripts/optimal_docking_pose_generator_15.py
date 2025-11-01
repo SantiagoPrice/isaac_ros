@@ -22,6 +22,7 @@ import tf2_geometry_msgs
 from tf2_geometry_msgs.tf2_geometry_msgs import do_transform_pose_stamped
 from tf2_ros import LookupException, ExtrapolationException, TransformException
 import math
+from rcl_interfaces.srv import GetParameters
 # <-- Import your custom service interface
 from multi_goal_planner_interfaces.srv import MultiGoalPlan
 
@@ -170,7 +171,7 @@ class PlaneCloudProcessorNode(Node):
             f"Distance={distance:.2f}m > 2.5m. Generating circle of radius=3.0m around table."
             )
 
-            # 3a) Visualize the 3D circle around the table center
+            # 3a) Visualize the 3D circle around the bed center
             circle_radius = 2.5
             
             # 3b) Approximate that circle as a polygon (or boundary) for sampling
