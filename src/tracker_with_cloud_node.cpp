@@ -9,11 +9,17 @@
 #include <tf2_ros/transform_listener.h>
 #include <tf2_ros/buffer.h>
 #include <tf2/LinearMath/Quaternion.h>
+#include "rcl_interfaces/srv/set_parameters.hpp"
+#include "rcl_interfaces/msg/parameter.hpp"
+#include "rclcpp/rclcpp.hpp"
+#include "std_srvs/srv/trigger.hpp"
+
+
 
 TrackerWithCloudNode::TrackerWithCloudNode() 
   : rclcpp::Node("tracker_with_cloud_node"),
     // plane_memory_duration_(1, 0) // store planes for 1 second
-    plane_memory_duration_{rclcpp::Duration::from_seconds(0.6)}
+    plane_memory_duration_{rclcpp::Duration::from_seconds(2.0)}
 
 {
   // ---------------------------
@@ -23,27 +29,80 @@ TrackerWithCloudNode::TrackerWithCloudNode()
   this->declare_parameter<std::string>("lidar_topic", "points_raw");
   this->declare_parameter<std::string>("yolo_result_topic", "yolo_result");
   this->declare_parameter<std::string>("yolo_3d_result_topic", "yolo_3d_result");
-  this->declare_parameter<float>("cluster_tolerance", 0.5f);
+  this->declare_parameter<std::string>("GOAL", "59");
+  this->declare_parameter<std::string>("cmd_vel_topic", "/cmd_vel");
+  this->declare_parameter<std::string>("g_cmap_node", "/global_costmap");
+  this->declare_parameter<std::string>("g_cmap_node2", "/global_costmap/global_costmap");
+
+  this->declare_parameter<float>("cluster_tolerance", 0.5f); // original: 0.5f
   this->declare_parameter<float>("voxel_leaf_size", 0.05f);
   this->declare_parameter<int>("min_cluster_size", 100);
   this->declare_parameter<int>("max_cluster_size", 25000);
+  
 
   this->get_parameter("camera_info_topic", camera_info_topic_);
   this->get_parameter("lidar_topic", lidar_topic_);
   this->get_parameter("yolo_result_topic", yolo_result_topic_);
   this->get_parameter("yolo_3d_result_topic", yolo_3d_result_topic_);
+  this->get_parameter("cmd_vel_topic", cmd_vel_topic_);
+  this->get_parameter("g_cmap_node", gc_map_node_);
+  this->get_parameter("g_cmap_node2", gc_map_node2_);
+  this->get_parameter("cluster_tolerance", cluster_tolerance_);
 
+ 
+
+
+
+
+  // ---------------------------
+  //Service to trigger servo
+  // ---------------------------
+
+  servo_trigger_srv_ = this->create_service<std_srvs::srv::Trigger>( "trigger_servo",
+  std::bind(&TrackerWithCloudNode::handleServoTrigger, this, std::placeholders::_1, std::placeholders::_2));
+  
+  servo_assess_srv_ = this->create_service<std_srvs::srv::Trigger>( "assess_servo",
+  std::bind(&TrackerWithCloudNode::servoCheck, this, std::placeholders::_1, std::placeholders::_2));
+ 
+ 
+ 
   // ---------------------------
   // Subscribers
   // ---------------------------
+  auto sensor_qos = rclcpp::SensorDataQoS();
+  auto default_qos = rclcpp::QoS(10); // RELIABLE
+  
   camera_info_sub_.subscribe(this, camera_info_topic_);
+  camera_info_sub_.registerCallback(std::bind(&TrackerWithCloudNode::cameraInfoCallback, this, std::placeholders::_1));
+
   lidar_sub_.subscribe(this, lidar_topic_);
+  lidar_sub_.registerCallback(std::bind(&TrackerWithCloudNode::lidarCallback, this, std::placeholders::_1));
+
   yolo_result_sub_.subscribe(this, yolo_result_topic_);
+  yolo_result_sub_.registerCallback(std::bind(&TrackerWithCloudNode::yoloCallback, this, std::placeholders::_1));
+
+  cmd_vel_sub_=this->create_subscription<geometry_msgs::msg::Twist>( cmd_vel_topic_,10,std::bind(&TrackerWithCloudNode::cmdVelCallback, this, std::placeholders::_1));
+  latest_cmd_vel_ = nullptr; // Initialize latest_cmd_vel_ to nullptr
+
+  // ---------------------------
+  // Auxiliar Publishers/subscriber (internal use)
+  // ---------------------------
+  yolo_adjusted_pub_ = this->create_publisher<ultralytics_ros::msg::YoloResult>("/yolo_result_adjusted", 10);
+  yolo_adjusted_sub_.subscribe(this, "/yolo_result_adjusted");
+
+  cam_adjusted_pub_ = this->create_publisher<sensor_msgs::msg::CameraInfo>("/camera_info_adjusted", 10);
+  cam_adjusted_sub_.subscribe(this, "/camera_info_adjusted");
+
+  lid_adjusted_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/lidar_info_adjusted", 10);
+  lid_adjusted_sub_.subscribe(this, "/lidar_info_adjusted");
+
+
+
 
   // Approximate sync
-  sync_ = std::make_shared<message_filters::Synchronizer<ApproximateSyncPolicy>>(
-            ApproximateSyncPolicy(500));
-  sync_->connectInput(camera_info_sub_, lidar_sub_, yolo_result_sub_);
+  sync_ = std::make_shared<message_filters::Synchronizer<ApproximateSyncPolicy>>(ApproximateSyncPolicy(500));
+  sync_->setMaxIntervalDuration(rclcpp::Duration::from_seconds(0.1));
+  sync_->connectInput(cam_adjusted_sub_, lid_adjusted_sub_, yolo_adjusted_sub_);
   sync_->registerCallback(std::bind(&TrackerWithCloudNode::syncCallback,
                                     this,
                                     std::placeholders::_1,
@@ -53,6 +112,8 @@ TrackerWithCloudNode::TrackerWithCloudNode()
   // ---------------------------
   // Publishers
   // ---------------------------
+
+
   detection3d_pub_ = this->create_publisher<vision_msgs::msg::Detection3DArray>(
                         yolo_3d_result_topic_, 1);
   detection_cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
@@ -74,7 +135,53 @@ TrackerWithCloudNode::TrackerWithCloudNode()
   // TF Buffer
   tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
   tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+  
+
 }
+
+void TrackerWithCloudNode::cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr msg)
+{
+  std::lock_guard<std::mutex> lock(cmd_vel_mutex_);
+  latest_cmd_vel_ = msg;
+}
+
+
+void TrackerWithCloudNode::yoloCallback(const ultralytics_ros::msg::YoloResult::ConstSharedPtr& msg)
+{
+    auto adjusted_message = std::make_shared<ultralytics_ros::msg::YoloResult>(*msg);
+    
+    // Subtract 100ms (or whatever the typical delay is)
+    rclcpp::Time original_time(msg->header.stamp);
+    rclcpp::Time corrected_time = original_time - rclcpp::Duration::from_seconds(0.00);
+
+    adjusted_message->header.stamp = corrected_time;
+    yolo_adjusted_pub_->publish(*adjusted_message);
+}
+
+void TrackerWithCloudNode::cameraInfoCallback(const sensor_msgs::msg::CameraInfo::ConstSharedPtr& msg)
+{
+    auto adjusted_message = std::make_shared<sensor_msgs::msg::CameraInfo>(*msg);
+    
+    // Subtract 100ms (or whatever the typical delay is)
+    rclcpp::Time original_time(msg->header.stamp);
+    rclcpp::Time corrected_time = original_time - rclcpp::Duration::from_seconds(0.0);
+
+    adjusted_message->header.stamp = corrected_time;
+    cam_adjusted_pub_->publish(*adjusted_message);
+}
+
+void TrackerWithCloudNode::lidarCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr& msg)
+{
+    auto adjusted_message = std::make_shared<sensor_msgs::msg::PointCloud2>(*msg);
+    
+    // Subtract 100ms (or whatever the typical delay is)
+    rclcpp::Time original_time(msg->header.stamp);
+    rclcpp::Time corrected_time = original_time - rclcpp::Duration::from_seconds(0.0);
+
+    adjusted_message->header.stamp = corrected_time;
+    lid_adjusted_pub_->publish(*adjusted_message);
+}
+
 
 void TrackerWithCloudNode::syncCallback(
   const sensor_msgs::msg::CameraInfo::ConstSharedPtr& camera_info_msg,
@@ -84,6 +191,40 @@ void TrackerWithCloudNode::syncCallback(
   rclcpp::Time current_call_time = this->now();
   rclcpp::Duration callback_interval = current_call_time - last_call_time_;
   last_call_time_ = current_call_time;
+
+  double cam_time = rclcpp::Time(camera_info_msg->header.stamp).seconds();
+  double lidar_time = rclcpp::Time(cloud_msg->header.stamp).seconds();
+  double yolo_time = rclcpp::Time(yolo_result_msg->header.stamp).seconds();
+
+  RCLCPP_INFO(this->get_logger(),
+      "Timestamps - Camera: %.6f | LiDAR: %.6f | YOLO: %.6f",
+      cam_time, lidar_time, yolo_time);
+
+
+  // 0) Terminate callback if the turning velocity of cmd_vel surpases 0.15
+  geometry_msgs::msg::Twist::SharedPtr cmd;
+  {
+    std::lock_guard<std::mutex> lock(cmd_vel_mutex_);
+    cmd = latest_cmd_vel_; // could be nullptr if not yet received
+  }
+
+  if (cmd)
+  {
+    RCLCPP_INFO(this->get_logger(), "cmd_vel turning velocity: %.1f",
+                  cmd->angular.z);
+    {
+      std::lock_guard<std::mutex> lock(cmd_vel_mutex_);
+      latest_cmd_vel_ = nullptr;
+    }
+    if (std::abs(cmd->angular.z) > 0.5f)
+    {
+      RCLCPP_WARN(this->get_logger(), "Skipping syncCallback due to cmd_vel turning velocity: %.2f",
+                  cmd->angular.z);  
+      return;
+    }
+  }
+  
+  
 
   // 1) Downsample
   pcl::PointCloud<pcl::PointXYZ>::Ptr downsampled_cloud(new pcl::PointCloud<pcl::PointXYZ>());
@@ -111,12 +252,12 @@ void TrackerWithCloudNode::syncCallback(
                detection_cloud_msg);
 
   // 5) Publish results
-  visualization_msgs::msg::MarkerArray marker_array_msg =
-      createMarkerArray(detection3d_array_msg, callback_interval.seconds());
+  // visualization_msgs::msg::MarkerArray marker_array_msg =
+  //     createMarkerArray(detection3d_array_msg, callback_interval.seconds());
 
-  detection3d_pub_->publish(detection3d_array_msg);
-  detection_cloud_pub_->publish(detection_cloud_msg);
-  marker_pub_->publish(marker_array_msg);
+  // detection3d_pub_->publish(detection3d_array_msg);
+  // detection_cloud_pub_->publish(detection_cloud_msg);
+  // marker_pub_->publish(marker_array_msg);
 
   RCLCPP_INFO(this->get_logger(), "syncCallback");
 }
@@ -131,6 +272,8 @@ void TrackerWithCloudNode::projectCloud(
   detection3d_array_msg.header = header;
   detection3d_array_msg.header.stamp = yolo_result_msg->header.stamp;
 
+  this->get_parameter("GOAL", docking_id_);
+
   RCLCPP_INFO(this->get_logger(),
               "Number of detections: %zu",
               yolo_result_msg->detections.detections.size());
@@ -143,228 +286,165 @@ void TrackerWithCloudNode::projectCloud(
     bool is_class_60 = false;
     for (const auto &r : yolo_result_msg->detections.detections[i].results)
     {
-      if (r.hypothesis.class_id == "59") {
+      if (r.hypothesis.class_id == docking_id_) {
         is_class_60 = true;
-        break;
       }
-    }
-    if (!is_class_60) {
+      if (!is_class_60) {
       // skip if not class 60
       continue;
-    }
-
-
-    // Gather points
-    pcl::PointCloud<pcl::PointXYZ>::Ptr detection_cloud_raw(new pcl::PointCloud<pcl::PointXYZ>());
-
-    // Single combined mask scenario
-    if (have_single_mask)
-    {
-      RCLCPP_INFO(this->get_logger(), "Using single combined mask for detection idx=%zu", i);
-      // We pass 'i' so we know to look for pixel == i+1
-      processPointsWithMask(
-        cloud,
-        yolo_result_msg->masks[0],  // the single combined mask
-        i,                          // detection index
-        detection_cloud_raw
-      );
-    }
-    else
-    {
-      // fallback to bounding box
-      RCLCPP_INFO(this->get_logger(), "No mask found, using bounding box for detection idx=%zu", i);
-      processPointsWithBbox(cloud,
-                            yolo_result_msg->detections.detections[i],
-                            detection_cloud_raw);
-    }
-
-    if (!detection_cloud_raw->empty())
-    {
-      // Transform detection cloud back -> original frame
-      pcl::PointCloud<pcl::PointXYZ>::Ptr detection_cloud(new pcl::PointCloud<pcl::PointXYZ>());
-      detection_cloud = cloud2TransformedCloud(
-                          detection_cloud_raw,
-                          cam_model_.tfFrame(),
-                          header.frame_id,
-                          header.stamp);
-
-      // cluster extraction (optional)
-      pcl::PointCloud<pcl::PointXYZ>::Ptr closest_cloud = euclideanClusterExtraction(detection_cloud);
-
-      // optional plane fitting
-      pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients());
-      pcl::PointIndices::Ptr inliers(new pcl::PointIndices());
-      pcl::SACSegmentation<pcl::PointXYZ> seg;
-      seg.setOptimizeCoefficients(true);
-      seg.setModelType(pcl::SACMODEL_PLANE);
-      seg.setMethodType(pcl::SAC_RANSAC);
-      seg.setDistanceThreshold(0.02);
-      seg.setInputCloud(closest_cloud);
-      seg.segment(*inliers, *coefficients);
-
-      if (!inliers->indices.empty())
-      {
-        // example plane inliers
-        RCLCPP_INFO(this->get_logger(),
-                    "Plane with %zu inliers for detection idx=%zu (class=60)",
-                    inliers->indices.size(), i);
-
-        pcl::PointCloud<pcl::PointXYZ>::Ptr plane_cloud(new pcl::PointCloud<pcl::PointXYZ>());
-        pcl::ExtractIndices<pcl::PointXYZ> extract;
-        extract.setInputCloud(closest_cloud);
-        extract.setIndices(inliers);
-        extract.filter(*plane_cloud);
-
-        // 5) Compute centroid of the plane in "header.frame_id"
-        Eigen::Vector4f centroid;
-        pcl::compute3DCentroid(*plane_cloud, centroid);
-
-        // 6) Transform the centroid -> map frame (or whichever global frame you want)
-        geometry_msgs::msg::Point plane_center_local;
-        plane_center_local.x = centroid[0];
-        plane_center_local.y = centroid[1];
-        plane_center_local.z = centroid[2];
-
-        last_plane_center_map_ = plane_center_local;
-        // Mark that we do have a plane center
-        geometry_msgs::msg::Point center_in_base;
-        bool tf_ok = transformPointFrameToFrame(last_plane_center_map_, center_in_base, "hesai_lidar", "base_link");
-        float dx = center_in_base.x;
-        float dy = center_in_base.y;
-        float dz = center_in_base.z;
-        float dist_plane = std::sqrt(dx*dx + dy*dy);
-        RCLCPP_INFO(this->get_logger(),
-                        "plane distance %.2f", dist_plane);
-
-        have_plane_center_ = true;
-        // updateVisualServo(yolo_result_msg->detections.detections[i]);
-
-        float image_width  = static_cast<float>(cam_model_.fullResolution().width);
-        float image_height = static_cast<float>(cam_model_.fullResolution().height);
-        float edge_threshold_px = 20.0f;  // example threshold
-
-        const auto & detection2d_msg = yolo_result_msg->detections.detections[i];
-        bool near_edge = isBboxNearEdge(detection2d_msg, image_width, image_height, edge_threshold_px);
-
-        // ------------------------------------------------
-        // (B) Decide whether to store the plane
-        // ------------------------------------------------
-        // Condition = near edge OR dist < 4
-        bool condition = (dist_plane > 3.0f);
-        // bool condition_2 = (near_edge || dist_plane < 2.0f);
-        bool condition_2 = (near_edge || dist_plane < 2.0f);
-
-        // 3) Get the robot pose (base_link) in map frame
-        // if (condition)
-        // {
-        //   geometry_msgs::msg::TransformStamped base_link_map_tf;
-        //   try
-        //   {
-        //     // We want the transform FROM base_link TO map (or the other way around),
-        //     // so we can figure out the robot's position in map frame. Typically, we do:
-        //     //    lookupTransform("map", "base_link", ... )
-        //     // that means: "Give me a transform that transforms points from base_link -> map."
-        //     base_link_map_tf = tf_buffer_->lookupTransform("map", "base_link",
-        //                                                   tf2::TimePointZero);
-        //   }
-        //   catch (tf2::TransformException &ex)
-        //   {
-        //     RCLCPP_WARN(this->get_logger(), "Could not get base_link->map transform: %s", ex.what());
-        //     return;
-        //   }
-
-        //   // Extract robot position (rx, ry, rz) in map frame
-        //   double rx = base_link_map_tf.transform.translation.x;
-        //   double ry = base_link_map_tf.transform.translation.y;
-        //   double rz = base_link_map_tf.transform.translation.z;
-
-        //   // 4) Distance and direction from robot -> plane center
-        //   geometry_msgs::msg::Point plane_center_map;
-        //   bool tf_ok = transformPointFrameToFrame(plane_center_local, plane_center_map, "hesai_lidar", "map");
-        //   double px = plane_center_map.x;
-        //   double py = plane_center_map.y;
-        //   double pz = plane_center_map.z;
-
-        //   double dx = px - rx;
-        //   double dy = py - ry;
-        //   double dz = pz - rz;
-        //   double dist_plane = std::sqrt(dx*dx + dy*dy);
-
-        //   RCLCPP_INFO(this->get_logger(), "Distance to plane center (map frame): %.2f m", dist_plane);
-        //   RCLCPP_INFO(this->get_logger(), "px py pz %.2f,  %.2f, %.2f",plane_center_map.x, plane_center_map.y, plane_center_map.z);
-        //   RCLCPP_INFO(this->get_logger(), "rx ry rz %.2f,  %.2f, %.2f",rx, ry, rz);
-
-        //   if (dist_plane < 1e-3) {
-        //     RCLCPP_WARN(this->get_logger(),
-        //                 "Plane center is essentially at the robot position; skipping goal calc.");
-        //     return;
-        //   }
-
-        //   // 5) Compute the goal pose 2.5 m away from plane center (map frame)
-        //   double offset = 2.5; // 2.5 m away from the plane
-        //   // Unit direction from robot to plane
-        //   double ux = dx / dist_plane;
-        //   double uy = dy / dist_plane;
-        //   double uz = dz / dist_plane;
-
-        //   geometry_msgs::msg::PoseStamped goal_pose;
-        //   goal_pose.header.stamp = this->now();
-        //   goal_pose.header.frame_id = "map";
-
-        //   // Position: plane center minus offset in the direction from robot->plane
-        //   goal_pose.pose.position.x = px - offset * ux;
-        //   goal_pose.pose.position.y = py - offset * uy;
-        //   goal_pose.pose.position.z = pz - offset * uz;
-
-        //   // Orientation: face the plane in XY-plane (simple yaw for ground robot)
-        //   double yaw = std::atan2((py - goal_pose.pose.position.y),
-        //                           (px - goal_pose.pose.position.x));
-        //   tf2::Quaternion q;
-        //   q.setRPY(0.0, 0.0, yaw);
-        //   goal_pose.pose.orientation = tf2::toMsg(q);
-
-        //   // 6) Publish the goal
-        //   goal_pose_pub_->publish(goal_pose);
-
-        //   RCLCPP_INFO(this->get_logger(),
-        //               "Published goal in map frame, 2.5 m from plane center.");
-        // }
-        // else
-        // {
-          if (!condition_2)
-          {// servo_done_ == true => we no longer do servo, but we keep storing plane
-          rclcpp::Time now_t = this->now();
-          plane_buffer_.push_back({now_t, plane_cloud});
-          while (!plane_buffer_.empty() &&
-                (now_t - plane_buffer_.front().first) > plane_memory_duration_) {
-            plane_buffer_.pop_front();
-          }
-          publishCombinedPlane(now_t, header);
-
-          RCLCPP_INFO(this->get_logger(),
-                      "servo_done_=true => ignoring servo, always storing plane now");
-          }
-          else
-          {
-            RCLCPP_INFO(this->get_logger(),
-                      "get too close to the table, skip storing plane.");
-          }
-        // }
       }
 
-      // create bounding box in 3D
-      createBoundingBox(
-        detection3d_array_msg,
-        closest_cloud,
-        yolo_result_msg->detections.detections[i].results
-      );
-    }
-  }
 
-  // empty detection cloud
-  pcl::PointCloud<pcl::PointXYZ> empty_cloud;
-  pcl::toROSMsg(empty_cloud, combine_detection_cloud_msg);
-  combine_detection_cloud_msg.header = header;
+      // Gather points
+      pcl::PointCloud<pcl::PointXYZ>::Ptr detection_cloud_raw(new pcl::PointCloud<pcl::PointXYZ>());
+
+      // Single combined mask scenario
+      if (have_single_mask)
+      {
+        RCLCPP_INFO(this->get_logger(), "Using single combined mask for detection idx=%zu", i);
+        // We pass 'i' so we know to look for pixel == i+1
+        processPointsWithMask(
+          cloud,
+          yolo_result_msg->masks[0],  // the single combined mask
+          i,                          // detection index
+          detection_cloud_raw
+        );
+      }
+      else
+      {
+        // fallback to bounding box
+        RCLCPP_INFO(this->get_logger(), "No mask found, using bounding box for detection idx=%zu", i);
+        processPointsWithBbox(cloud,
+                              yolo_result_msg->detections.detections[i],
+                              detection_cloud_raw);
+      }
+
+      if (!detection_cloud_raw->empty())
+      {
+        // Transform detection cloud back -> original frame
+        pcl::PointCloud<pcl::PointXYZ>::Ptr detection_cloud(new pcl::PointCloud<pcl::PointXYZ>());
+        detection_cloud = cloud2TransformedCloud(
+                            detection_cloud_raw,
+                            cam_model_.tfFrame(),
+                            header.frame_id,
+                            header.stamp);
+
+        // cluster extraction (optional)
+        pcl::PointCloud<pcl::PointXYZ>::Ptr closest_cloud = euclideanClusterExtraction(detection_cloud);
+
+        // optional plane fitting
+        pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients());
+        pcl::PointIndices::Ptr inliers(new pcl::PointIndices());
+        pcl::SACSegmentation<pcl::PointXYZ> seg;
+        seg.setOptimizeCoefficients(true);
+        seg.setModelType(pcl::SACMODEL_PLANE);
+        seg.setMethodType(pcl::SAC_RANSAC);
+        seg.setDistanceThreshold(0.02);
+        seg.setInputCloud(closest_cloud);
+        seg.segment(*inliers, *coefficients);
+
+        if (!inliers->indices.empty())
+        {
+          // example plane inliers
+          RCLCPP_INFO(this->get_logger(),
+                      "Plane with %zu inliers for detection idx=%zu (class=60)",
+                      inliers->indices.size(), i);
+
+          pcl::PointCloud<pcl::PointXYZ>::Ptr plane_cloud(new pcl::PointCloud<pcl::PointXYZ>());
+          pcl::ExtractIndices<pcl::PointXYZ> extract;
+          extract.setInputCloud(closest_cloud);
+          extract.setIndices(inliers);
+          extract.filter(*plane_cloud);
+
+          // 5) Compute centroid of the plane in "header.frame_id"
+          Eigen::Vector4f centroid;
+          pcl::compute3DCentroid(*plane_cloud, centroid);
+
+
+          // 6) Transform the centroid -> map frame (or whichever global frame you want)
+          geometry_msgs::msg::Point plane_center_local;
+          plane_center_local.x = centroid[0];
+          plane_center_local.y = centroid[1];
+          plane_center_local.z = centroid[2];
+    
+
+          last_plane_center_map_ = plane_center_local;
+          // Mark that we do have a plane center
+          geometry_msgs::msg::Point center_in_base;
+          bool tf_ok = transformPointFrameToFrame(last_plane_center_map_, center_in_base, "hesai_lidar", "base_link");
+          float dx = center_in_base.x;
+          float dy = center_in_base.y;
+          float dz = center_in_base.z;
+          float dist_plane = std::sqrt(dx*dx + dy*dy);
+          RCLCPP_INFO(this->get_logger(),
+                          "plane distance %.2f", dist_plane);
+
+          have_plane_center_ = true;
+          // updateVisualServo(yolo_result_msg->detections.detections[i]);
+
+          float image_width  = static_cast<float>(cam_model_.fullResolution().width);
+          float image_height = static_cast<float>(cam_model_.fullResolution().height);
+          float edge_threshold_px = 20.0f;  // example threshold
+
+          const auto & detection2d_msg = yolo_result_msg->detections.detections[i];
+          bool near_edge = isBboxNearEdge(detection2d_msg, image_width, image_height, edge_threshold_px);
+
+          // ------------------------------------------------
+          // (B) Decide whether to store the plane
+          // ------------------------------------------------
+          // Condition = near edge OR dist < 4
+          bool condition = (dist_plane > 3.0f);
+          // bool condition_2 = (near_edge || dist_plane < 2.0f);
+          bool condition_2 = (near_edge);
+
+          // 3) Get the robot pose (base_link) in map frame
+
+          if (!condition_2 && !servo_running_)
+            {// Drive in servo mode until we are close enough to the table
+            
+            // Update the visual servoing command
+            //updateVisualServo(yolo_result_msg->detections.detections[i]);
+            
+            rclcpp::Time now_t(header.stamp); //this->now(); test to enhance sychronization, it
+            plane_buffer_.push_back({now_t, plane_cloud});
+            while (!plane_buffer_.empty() &&
+                  (now_t - plane_buffer_.front().first) > plane_memory_duration_) {
+              plane_buffer_.pop_front();
+            }
+            publishCombinedPlane(now_t, header);
+
+            RCLCPP_INFO(this->get_logger(),
+                        "servo_done_=true => ignoring servo, always storing plane now");
+            }
+            else if (servo_running_)
+            {
+              updateVisualServoPureRot(yolo_result_msg->detections.detections[i]);
+              RCLCPP_INFO(this->get_logger(),
+                        "servo_done_=false => visual servoing to table center");
+            }
+            else
+            {
+              latest_cmd_vel_ = nullptr; 
+              RCLCPP_INFO(this->get_logger(),
+                        "get too close to the table, skip storing plane.");
+            }
+          // }
+        }
+
+        // create bounding box in 3D
+        createBoundingBox(
+          detection3d_array_msg,
+          closest_cloud,
+          yolo_result_msg->detections.detections[i].results
+        );
+      }
+    }
+
+    // empty detection cloud
+    pcl::PointCloud<pcl::PointXYZ> empty_cloud;
+    pcl::toROSMsg(empty_cloud, combine_detection_cloud_msg);
+    combine_detection_cloud_msg.header = header;
+  }
 }
 
 void TrackerWithCloudNode::updateVisualServo(const vision_msgs::msg::Detection2D &detection2d_msg)
@@ -486,15 +566,76 @@ void TrackerWithCloudNode::updateVisualServo(const vision_msgs::msg::Detection2D
       }
     }
   }
+}
+
+  void TrackerWithCloudNode::updateVisualServoPureRot(const vision_msgs::msg::Detection2D &detection2d_msg)
+{
+  // 1) Retrieve bounding box info + image size
+  float image_width  = static_cast<float>(cam_model_.fullResolution().width);
+  float image_height = static_cast<float>(cam_model_.fullResolution().height);
+  if (image_width <= 0.0f || image_height <= 0.0f) {
+    RCLCPP_WARN(this->get_logger(), "No valid camera info => cannot do servo");
+    return;
+  }
+
+  float cx = detection2d_msg.bbox.center.position.x;
+  float cy = detection2d_msg.bbox.center.position.y;
+  float w  = detection2d_msg.bbox.size_x;
+  float h  = detection2d_msg.bbox.size_y;
+
+  float left   = cx - w * 0.5f;
+  float right  = cx + w * 0.5f;
+  float top    = cy - h * 0.5f;
+  float bottom = cy + h * 0.5f;
+
+  float dist_left  = left;                   // distance from left image border
+  float dist_right = image_width  - right;   // distance from right border
+  float dist_top   = top;                    // distance from top border
+  float dist_down  = image_height - bottom;  // distance from bottom border
+
+  float edge_threshold = 20.0f;  // px
+  bool near_left  = (dist_left  < edge_threshold);
+  bool near_right = (dist_right < edge_threshold);
+  bool near_top   = (dist_top   < edge_threshold);
+  bool near_down  = (dist_down  < edge_threshold);
+
+  // 2) Prepare a Twist
+  geometry_msgs::msg::Twist cmd;
+  cmd.linear.x  = 0.0f;
+  cmd.angular.z = 0.0f;
+
+  // Gains and speeds
+  float rot_speed     = 0.17f;   // rad/s for simple in-place rotation
+
+
+  // 3) Priority: edges
+  if (near_left)
+  {
+    // Turn left in place
+    cmd.angular.z = +rot_speed;
+  }
+  else if (near_right)
+  {
+    // Turn right in place
+    cmd.angular.z = -rot_speed;
+  }
+  else
+  {
+    // The image is centered 
+    std::lock_guard<std::mutex> lock(trig_mutex_);
+    servo_running_ =false;
+    return;
+  }
 
   // 5) Publish final cmd
   visual_servo_pub_->publish(cmd);
 
   RCLCPP_INFO(this->get_logger(),
-    "[updateVisualServo] near_edge=(L:%d,R:%d,T:%d,D:%d) => cmd( lin=%.2f, ang=%.2f )",
-    (near_left?1:0),(near_right?1:0),(near_top?1:0),(near_down?1:0),
+    "[updateVisualServo] near_edge=(L:%d,R:%d) => cmd( lin=%.2f, ang=%.2f )",
+    (near_left?1:0),(near_right?1:0),
     cmd.linear.x, cmd.angular.z
   );
+  return;
 }
 
 bool TrackerWithCloudNode::transformPointFrameToFrame(
@@ -666,6 +807,37 @@ void TrackerWithCloudNode::processPointsWithMask(
   );
 }
 
+void TrackerWithCloudNode::handleServoTrigger(
+  const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+  std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+{
+  std::lock_guard<std::mutex> lock(trig_mutex_);
+  servo_running_= true;
+
+  response->success = true;
+  response->message = "Visual servo update triggered successfully.";
+  RCLCPP_INFO(this->get_logger(), "Triggered visual servo update.");
+}
+
+void TrackerWithCloudNode::servoCheck(
+  const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+  std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+{
+  response->success = !servo_running_;
+  if (response->success) {
+    response->message = "Servo finished.";
+    RCLCPP_INFO(this->get_logger(), "Servo finished");    
+  }
+  else
+  {
+    response->message = "Servo is ongoing";
+    RCLCPP_WARN(this->get_logger(), "Servo is still centering the image");
+  }
+  
+}
+
+
+
 // Keep the rest of your functions: processPointsWithBbox, createBoundingBox, 
 // downsampleCloudMsg, transformPointCloud, publishCombinedPlane, etc.
 // unchanged from the original code, other than removing references to yolo_result_msg->masks[i].
@@ -706,9 +878,10 @@ void TrackerWithCloudNode::createBoundingBox(
     return;
   }
 
-  // Compute centroid
+  //Compute centroid
   Eigen::Vector4f centroid;
   pcl::compute3DCentroid(*cloud, centroid);
+
 
   // Compute an orientation (rotating around Z to flatten bounding box)
   double theta = -atan2(centroid[1], sqrt(pow(centroid[0], 2) + pow(centroid[2], 2)));
@@ -876,29 +1049,34 @@ TrackerWithCloudNode::euclideanClusterExtraction(const pcl::PointCloud<pcl::Poin
   ec.setInputCloud(cloud);
   ec.extract(cluster_indices);
 
-  // We'll pick the cluster whose centroid is closest to the origin
+  // [old] We'll pick the cluster whose centroid is closest to the origin
+  // [] New: discard smal clusters, keep the largest clusters
+
   float min_distance = std::numeric_limits<float>::max();
+  float max_size = 0.0f;
   pcl::PointCloud<pcl::PointXYZ>::Ptr closest_cluster(new pcl::PointCloud<pcl::PointXYZ>());
 
   for (const auto& cluster : cluster_indices)
   {
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_cluster(new pcl::PointCloud<pcl::PointXYZ>());
+    //pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_cluster(new pcl::PointCloud<pcl::PointXYZ>());
     for (const auto& idx : cluster.indices)
     {
-      cloud_cluster->push_back((*cloud)[idx]);
+      //cloud_cluster->push_back((*cloud)[idx]);
+      closest_cluster->points.push_back(cloud->points[idx]);
     }
 
+    /*
     // Compute centroid
     Eigen::Vector4f centroid;
     pcl::compute3DCentroid(*cloud_cluster, centroid);
     float distance = centroid.norm();
 
-    // Keep the cluster that is closest
+
     if (distance < min_distance)
     {
       min_distance = distance;
       *closest_cluster = *cloud_cluster;
-    }
+    }*/
   }
 
   return closest_cluster;

@@ -53,6 +53,9 @@
 
 #include <pcl/filters/extract_indices.h>
 #include <pcl/segmentation/sac_segmentation.h>
+#include "rcl_interfaces/msg/parameter.hpp"
+
+#include "std_srvs/srv/trigger.hpp"
 
 typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::msg::CameraInfo, sensor_msgs::msg::PointCloud2,
                                                         ultralytics_ros::msg::YoloResult>
@@ -67,10 +70,27 @@ private:
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr plane_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr goal_pose_pub_;
+  rclcpp::Publisher<ultralytics_ros::msg::YoloResult>::SharedPtr yolo_adjusted_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr cam_adjusted_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr lid_adjusted_pub_;
+
   image_geometry::PinholeCameraModel cam_model_;
   message_filters::Subscriber<sensor_msgs::msg::CameraInfo> camera_info_sub_;
+  message_filters::Subscriber<sensor_msgs::msg::CameraInfo> cam_adjusted_sub_;
   message_filters::Subscriber<sensor_msgs::msg::PointCloud2> lidar_sub_;
+  message_filters::Subscriber<sensor_msgs::msg::PointCloud2> lid_adjusted_sub_;
   message_filters::Subscriber<ultralytics_ros::msg::YoloResult> yolo_result_sub_;
+  message_filters::Subscriber<ultralytics_ros::msg::YoloResult> yolo_adjusted_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_sub_;
+  
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr servo_trigger_srv_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr servo_assess_srv_;
+
+  geometry_msgs::msg::Twist::SharedPtr latest_cmd_vel_;
+  std::mutex cmd_vel_mutex_;
+  std::mutex trig_mutex_;
+
+
   std::shared_ptr<message_filters::Synchronizer<ApproximateSyncPolicy>> sync_;
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
@@ -78,6 +98,15 @@ private:
   std::string lidar_topic_;
   std::string yolo_result_topic_;
   std::string yolo_3d_result_topic_;
+  std::string docking_id_;
+  std::string cmd_vel_topic_;
+  std::string gc_map_node_="/global_costmap";
+  std::string gc_map_node2_="/global_costmap/global_costmap";
+
+
+  bool servo_running_=false; // precents sending plane clouds during servo mode 
+
+
   float cluster_tolerance_;
   float voxel_leaf_size_;
   int min_cluster_size_;
@@ -92,6 +121,13 @@ public:
   void syncCallback(const sensor_msgs::msg::CameraInfo::ConstSharedPtr& camera_info_msg,
                     const sensor_msgs::msg::PointCloud2::ConstSharedPtr& cloud_msg,
                     const ultralytics_ros::msg::YoloResult::ConstSharedPtr& yolo_result_msg);
+  void yoloCallback(const ultralytics_ros::msg::YoloResult::ConstSharedPtr& msg);
+  void handleServoTrigger( const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+                                                  std::shared_ptr<std_srvs::srv::Trigger::Response> response);
+  void servoCheck( const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+                                                  std::shared_ptr<std_srvs::srv::Trigger::Response> response);                                               
+  void cameraInfoCallback(const sensor_msgs::msg::CameraInfo::ConstSharedPtr& msg);
+  void lidarCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr& msg);
   void transformPointCloud(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud_in,
                            pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud_out, const Eigen::Affine3f& transform);
   void projectCloud(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
@@ -108,12 +144,13 @@ public:
                          const std::vector<vision_msgs::msg::ObjectHypothesisWithPose>& detections_results_msg);
   pcl::PointCloud<pcl::PointXYZ>::Ptr downsampleCloudMsg(const sensor_msgs::msg::PointCloud2::ConstSharedPtr& cloud_msg);
   bool waitForTransform(const std::string &target_frame, const std::string &source_frame, const rclcpp::Time &time, const rclcpp::Duration &timeout);
-
+  
   pcl::PointCloud<pcl::PointXYZ>::Ptr cloud2TransformedCloud(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
                                                              const std::string& source_frame,
                                                              const std::string& target_frame,
                                                              const rclcpp::Time& stamp);
   pcl::PointCloud<pcl::PointXYZ>::Ptr euclideanClusterExtraction(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud);
+  void cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr msg);
   visualization_msgs::msg::MarkerArray
   createMarkerArray(const vision_msgs::msg::Detection3DArray& detection3d_array_msg, const double& duration);
   bool isBboxNearEdge(
@@ -126,6 +163,7 @@ public:
   bool have_plane_center_ = false;
   geometry_msgs::msg::Point last_plane_center_map_;
   void updateVisualServo(const vision_msgs::msg::Detection2D &detection2d_msg);
+  void updateVisualServoPureRot(const vision_msgs::msg::Detection2D &detection2d_msg);
   bool transformPointFrameToFrame(const geometry_msgs::msg::Point &pt_in_map,
                                geometry_msgs::msg::Point &pt_in_base,
                                 const std::string &from_frame,
