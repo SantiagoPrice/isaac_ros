@@ -598,7 +598,7 @@ class PlaneCloudProcessorNode(Node):
         MAX_EDGE_LENGTH = 3.0
 
         # Distances (meters) near each edge extreme in which we want to generate poses
-        NEAR_START_DIST = 0.3
+        NEAR_START_DIST = 0.1
         NEAR_END_DIST   = 0.6
 
         for edge in padded_edges:
