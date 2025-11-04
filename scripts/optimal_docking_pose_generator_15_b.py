@@ -168,13 +168,13 @@ class PlaneCloudProcessorNode(Node):
         distance_vector = self.table_center - robot_position
         distance = np.linalg.norm(distance_vector)
 
-        if distance> 4.7:
+        if distance> 5.1:
             self.get_logger().info(
             f"Distance={distance:.2f}m > 2.5m. Generating circle of radius=3.0m around table."
             )
 
             # 3a) Visualize the 3D circle around the bed center
-            circle_radius = 4.3
+            circle_radius = 3.0
             
             # 3b) Approximate that circle as a polygon (or boundary) for sampling
             #     We'll assume you have a helper like: create_circle_polygon(center, radius, num_segments)
@@ -564,7 +564,7 @@ class PlaneCloudProcessorNode(Node):
                 
                 print(f"Cosine of angle {cos_alfa:.2f}")
 
-                if (dot_product < 0) and (abs(cos_alfa) > 0.99):  # cos(15 degrees) = 0.965
+                if (dot_product < 0) and (abs(cos_alfa) > 0.965):  # cos(15 degrees) = 0.965
 
                     q = self.compute_orientation_from_nearest_edge(sample_xyz, padded_edges)
 
@@ -594,8 +594,8 @@ class PlaneCloudProcessorNode(Node):
         all_clusters = []
 
         # Filter only edges of interest: length between 1.5m and 2.0m
-        MIN_EDGE_LENGTH = 1.4
-        MAX_EDGE_LENGTH = 2.0
+        MIN_EDGE_LENGTH = 1.5
+        MAX_EDGE_LENGTH = 3.0
 
         # Distances (meters) near each edge extreme in which we want to generate poses
         NEAR_START_DIST = 0.3
@@ -605,6 +605,7 @@ class PlaneCloudProcessorNode(Node):
             # If the edge isn’t exactly two endpoints, skip
             if len(edge) != 2:
                 all_clusters.append([])
+                self.logger.warn("Edge does not have exactly two endpoints.")
                 continue
 
             p1 = np.array(edge[0])
@@ -886,7 +887,7 @@ class PlaneCloudProcessorNode(Node):
             cx, cy, _cz = corner
             dist = math.sqrt((gx - cx)**2 + (gy - cy)**2)
             cost += 1.0 / (dist + epsilon)
-        return cost * 8
+        return cost * 0
 
     ###########################################################################
     # 6) Publish all possible placements
