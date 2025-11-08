@@ -1,4 +1,4 @@
-# Revised code for RAL25 demo
+# Revised code for RAL25 bed demo
 
 #!/usr/bin/env python3
 
@@ -174,7 +174,7 @@ class PlaneCloudProcessorNode(Node):
             )
 
             # 3a) Visualize the 3D circle around the bed center
-            circle_radius = 3.0
+            circle_radius = 3.5
             
             # 3b) Approximate that circle as a polygon (or boundary) for sampling
             #     We'll assume you have a helper like: create_circle_polygon(center, radius, num_segments)
@@ -564,7 +564,7 @@ class PlaneCloudProcessorNode(Node):
                 
                 print(f"Cosine of angle {cos_alfa:.2f}")
 
-                if (dot_product < 0) and (abs(cos_alfa) > 0.965):  # cos(15 degrees) = 0.965
+                if (dot_product < 0) and (abs(cos_alfa) > 0.98):  # cos(15 degrees) = 0.965
 
                     q = self.compute_orientation_from_nearest_edge(sample_xyz, padded_edges)
 
@@ -599,7 +599,7 @@ class PlaneCloudProcessorNode(Node):
 
         # Distances (meters) near each edge extreme in which we want to generate poses
         NEAR_START_DIST = 0.1
-        NEAR_END_DIST   = 0.6
+        NEAR_END_DIST   = 0.45
 
         for edge in padded_edges:
             # If the edge isn’t exactly two endpoints, skip
@@ -720,7 +720,7 @@ class PlaneCloudProcessorNode(Node):
         return filtered_clusters
 
     def filter_for_collision_circle(self, pose_clusters, scene_tree, wheelchair_dims):
-        collision_radius = 0.4
+        collision_radius = 0.6
         self.get_logger().info(f"Filtering collisions using radius {collision_radius}")
 
         filtered_clusters = []

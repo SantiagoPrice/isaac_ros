@@ -609,7 +609,7 @@ class PlaneCloudProcessorNode(Node):
     def filter_for_collision(self, pose_clusters, scene_tree, wheelchair_dims):
         print("                       ")
 
-        collision_radius = 0.6
+        collision_radius = 0.8
         self.get_logger().info(f"Filtering collisions using radius {collision_radius}")
 
         filtered_clusters = []
