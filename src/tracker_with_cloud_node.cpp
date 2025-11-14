@@ -1049,34 +1049,30 @@ TrackerWithCloudNode::euclideanClusterExtraction(const pcl::PointCloud<pcl::Poin
   ec.setInputCloud(cloud);
   ec.extract(cluster_indices);
 
-  // [old] We'll pick the cluster whose centroid is closest to the origin
-  // [] New: discard smal clusters, keep the largest clusters
-
+  // We'll pick the cluster whose centroid is closest to the origin
   float min_distance = std::numeric_limits<float>::max();
   float max_size = 0.0f;
   pcl::PointCloud<pcl::PointXYZ>::Ptr closest_cluster(new pcl::PointCloud<pcl::PointXYZ>());
 
   for (const auto& cluster : cluster_indices)
   {
-    //pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_cluster(new pcl::PointCloud<pcl::PointXYZ>());
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_cluster(new pcl::PointCloud<pcl::PointXYZ>());
     for (const auto& idx : cluster.indices)
     {
-      //cloud_cluster->push_back((*cloud)[idx]);
-      closest_cluster->points.push_back(cloud->points[idx]);
+      cloud_cluster->push_back((*cloud)[idx]);
     }
 
-    /*
     // Compute centroid
     Eigen::Vector4f centroid;
     pcl::compute3DCentroid(*cloud_cluster, centroid);
     float distance = centroid.norm();
 
-
+    // Keep the cluster that is closest
     if (distance < min_distance)
     {
       min_distance = distance;
       *closest_cluster = *cloud_cluster;
-    }*/
+    }
   }
 
   return closest_cluster;
