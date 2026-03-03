@@ -5,7 +5,7 @@
 
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import PointCloud2, PointField
+from sensor_msgs.msg import PointCloud2
 from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Point, Quaternion, PoseStamped
 from sensor_msgs_py import point_cloud2
@@ -16,30 +16,21 @@ from rclpy.duration import Duration as RclpyDuration
 import tf2_ros
 import tf_transformations
 from scipy.spatial import cKDTree
-import time
-import tf2_geometry_msgs
-from tf2_geometry_msgs.tf2_geometry_msgs import do_transform_pose_stamped
+
+
 from tf2_ros import LookupException, ExtrapolationException, TransformException
 
 import math
-import struct
-import random
-from std_msgs.msg import Header
-from builtin_interfaces.msg import Time
+
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 
 # Action to stop goal momentarily 
-from rclpy.action import ActionClient
 
 
 from action_msgs.srv import CancelGoal
 
 # <-- Import your custom service interface
-from multi_goal_planner_interfaces.srv import MultiGoalPlan
-from std_srvs.srv import Trigger
-
-from rclpy.parameter import Parameter
-from rcl_interfaces.srv import GetParameters ,SetParameters
+from rcl_interfaces.srv import SetParameters
 from rclpy.callback_groups import ReentrantCallbackGroup
 
 # Update nav2 parameters via yaml files
@@ -51,8 +42,8 @@ class PlaneCloudProcessorNode(Node):
         super().__init__('plane_cloud_processor_node')
         
         # Publishers
-        self.polygon_pub = self.create_publisher(Marker, '/table_marker', 1)
-        self.polygon2_pub = self.create_publisher(Marker, '/robot_marker', 1)
+        self.polygon_pub = self.create_publisher(Marker, '/table_marker_rel', 1)
+        self.polygon2_pub = self.create_publisher(Marker, '/robot_marker_rel', 1)
 
 
 
