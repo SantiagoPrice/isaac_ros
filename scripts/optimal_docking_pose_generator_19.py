@@ -86,6 +86,31 @@ class PlaneCloudProcessorNode(Node):
         while not self.plan_cli.wait_for_service(timeout_sec=2.0):
             self.get_logger().info("Waiting for 'multi_goal_plan' service...")
         self.get_logger().info("'multi_goal_plan' service client ready!")
+        # ------------------------------------------------------------
+        #Auxuliar variables
+        #-------------------------------------------------------------
+
+        self.docking_id="59"
+        #------------------------------------------------------------
+        # Docking parameters for each target
+        #------------------------------------------------------------
+
+        self.docking_params = {"59": {"min_edge":1.4 ,
+                                      "near_start": 0.2,
+                                      "near_end": 0.2,
+                                      "yaw": 145.0 ,
+                                      "pad_edge": 0.7
+                                      }, #2.5 , 1.3
+                                "60": {"min_edge":0.2 , 
+                                       "near_start": 0.1,
+                                       "near_end": 0.1,
+                                       "yaw": 90.0,
+                                       "pad_edge": 0.95
+                                       },
+        } #pad edge 0.83
+
+
+
 
 
     ###########################################################################
@@ -301,7 +326,7 @@ class PlaneCloudProcessorNode(Node):
             self.publish_polygon_marker(polygon_3d, plane_cloud_msg.header)
 
             # 3) Build padded edges
-            padding_offset = 0.7 #0.95 for table, 0.7 for bed
+            padding_offset = self.docking_params[self.docking_id]["pad_edge"]
             padded_edges = self.calculate_padded_edges(polygon_3d, padding_offset)
             self.publish_padded_lines(padded_edges, plane_cloud_msg.header)
 
@@ -623,7 +648,7 @@ class PlaneCloudProcessorNode(Node):
 
         return all_clusters
 
-    def find_possible_placements(self, padded_edges, location_sampling_distance):
+    def find_possible_placements_old(self, padded_edges, location_sampling_distance):
         skip_distance = 0.2
         all_clusters = []
 
@@ -672,6 +697,106 @@ class PlaneCloudProcessorNode(Node):
 
         return all_clusters
 
+    def find_possible_placements(self, padded_edges, location_sampling_distance):
+            """
+            Generate poses at 30° bearing to each edge, limited only to edges
+            whose length is between 1.5m and 2.0m. For each edge, we sample
+            positions around 0.3m to 0.5m from each extreme end, oriented
+            in the direction of the 'longer side' (from p1 to p2 if p2 is
+            farther along the edge).
+            """
+            all_clusters = []
+
+            # Filter only edges of interest: length between 1.5m and 2.0m
+            #MIN_EDGE_LENGTH = 0.2 #1.4 for bed
+            MIN_EDGE_LENGTH = self.docking_params[self.docking_id]["min_edge"] #1.4 for bed
+
+
+            # Distances (meters) near each edge extreme in which we want to generate poses
+            #NEAR_START_DIST = 0.1 # 0.3 for bed
+            NEAR_START_DIST = self.docking_params[self.docking_id]["near_start"]
+
+            #NEAR_END_DIST   = 0.1 # 0.6 for bed
+            NEAR_END_DIST   = self.docking_params[self.docking_id]["near_end"] 
+
+            # Docking orientation
+            #YAW= 90.0  # degrees, bearing to the edge 30.0 for bed
+            YAW = self.docking_params[self.docking_id]["yaw"]  # degrees, bearing to the edge 30.0 for bed
+
+            for edge in padded_edges:
+                # If the edge isn’t exactly two endpoints, skip
+                if len(edge) != 2:
+                    all_clusters.append([])
+                    continue
+
+                p1 = np.array(edge[0])
+                p2 = np.array(edge[1])
+                vec = p2 - p1
+                length = np.linalg.norm(vec)
+
+                # Only consider edges in [1.5, 2.0]
+                if not (MIN_EDGE_LENGTH <= length):
+                    all_clusters.append([])
+                    continue
+
+                # Direction vector (p1 -> p2); we'll use atan2 for orientation
+                direction = vec / length
+                edge_yaw = math.degrees(math.atan2(direction[1], direction[0]))
+
+                cluster_list = []
+
+                # ----------------------------------------------------------------------
+                # Sample near the first extreme (p1), from 0.3m to 0.5m
+                # ----------------------------------------------------------------------
+                start_ratio = NEAR_START_DIST / length
+                end_ratio   = NEAR_END_DIST / length  # clamp if edge < 0.5m
+
+                if (1-end_ratio) > start_ratio:
+                    # Decide how many samples we want
+                    valid_len   = (1 - end_ratio - start_ratio) * length
+                    num_samples = int(valid_len / location_sampling_distance)
+                    num_samples = max(num_samples, 1)  # at least 1 pose
+
+                    for i in range(num_samples):
+                        alpha = start_ratio + i * (1 - end_ratio - start_ratio) / (num_samples - 1)
+                        sample_xyz = p1 + alpha * vec
+
+                        # Yaw = edge_yaw + 30° bearing
+                        if i <num_samples // 2:
+                            yaw_30 = edge_yaw + (180.0-YAW)
+                        else:
+                            yaw_30 = edge_yaw + YAW
+
+                        q = self.quaternion_from_yaw(yaw_30)
+
+                        pose_stamped = PoseStamped()
+                        pose_stamped.header.frame_id = 'map'
+                        pose_stamped.pose.position.x = float(sample_xyz[0])
+                        pose_stamped.pose.position.y = float(sample_xyz[1])
+                        pose_stamped.pose.position.z = float(sample_xyz[2])
+                        pose_stamped.pose.orientation.x = q[0]
+                        pose_stamped.pose.orientation.y = q[1]
+                        pose_stamped.pose.orientation.z = q[2]
+                        pose_stamped.pose.orientation.w = q[3]
+
+                        cluster_list.append(pose_stamped)
+                else:
+                    self.get_logger().warn(f"Edge condition are wrong: {start_ratio} > {end_ratio}. Skipping edge.")
+
+                all_clusters.append(cluster_list)
+
+            return all_clusters
+
+    def quaternion_from_yaw(self, yaw_degrees):
+        """
+        Helper function to convert a yaw (in degrees) about Z-axis
+        into a quaternion in (x, y, z, w) order.
+        """
+        yaw_radians = math.radians(yaw_degrees)
+        # Roll = 0, Pitch = 0, Yaw = yaw_radians
+        q = tf_transformations.quaternion_from_euler(0, 0, yaw_radians)
+        return q
+
 
     ###########################################################################
     # 4) Filter for collision
@@ -679,7 +804,7 @@ class PlaneCloudProcessorNode(Node):
     def filter_for_collision(self, pose_clusters, scene_tree, wheelchair_dims):
         print("                       ")
 
-        collision_radius = 0.6
+        collision_radius = 0.5
         self.get_logger().info(f"Filtering collisions using radius {collision_radius}")
 
         filtered_clusters = []
@@ -981,6 +1106,7 @@ class PlaneCloudProcessorNode(Node):
         # Publish as arrow
         marker = Marker()
         marker.header.frame_id = 'map'
+        marker.header.stamp = self.get_clock().now().to_msg() 
         marker.ns = "best_point_vector"
         marker.id = 0
         marker.type = Marker.ARROW

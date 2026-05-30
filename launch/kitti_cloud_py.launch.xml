@@ -12,8 +12,8 @@
   <arg name="cluster_tolerance" default="0.3"/>
   <!--<arg name="cluster_tolerance" default="0.15"/>-->
   <arg name="voxel_leaf_size" default="0.05"/>
-  <arg name="min_cluster_size" default="20"/>
-  <arg name="max_cluster_size" default="10000"/>
+  <arg name="min_cluster_size" default="1"/>
+  <arg name="max_cluster_size" default="1000000"/>
 
   <arg name="result_topic" default="/yolo_result"/>
 

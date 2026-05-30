@@ -7,8 +7,7 @@
 #include <utility>    // std::pair
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 #include <tf2_ros/transform_listener.h>
-#include <tf2_ros/buffer.h>
-#include <tf2/LinearMath/Quaternion.h>
+#include <tf2/time.h>
 #include "rcl_interfaces/srv/set_parameters.hpp"
 #include "rcl_interfaces/msg/parameter.hpp"
 #include "rclcpp/rclcpp.hpp"
@@ -19,7 +18,7 @@
 TrackerWithCloudNode::TrackerWithCloudNode() 
   : rclcpp::Node("tracker_with_cloud_node"),
     // plane_memory_duration_(1, 0) // store planes for 1 second
-    plane_memory_duration_{rclcpp::Duration::from_seconds(2.0)}
+    plane_memory_duration_{rclcpp::Duration::from_seconds(1.0)}
 
 {
   // ---------------------------
