@@ -49,7 +49,45 @@ import yaml
 class PlaneCloudProcessorNode(Node):
     def __init__(self):
         super().__init__('plane_cloud_processor_node')
+
+
+
+        # ------------------------------------------------------------
+        #Auxuliar variables (declared before callback funcions)
+        #-------------------------------------------------------------
+
+        self.can_trig_init=True
+        self.can_assess_init=False
+        self.phase3_triggered = True # prevents moving from phase3 to phase 2
+        self.phase2_skip = False # make phase3 to read plane cloud once
+        self.phase3_skip= False
+        self.coll_cloud_pts = []
+        self.coll_pts_calls = 0
+        self.debug_collision= False
+        self.rviz_goal_cancelled = False # dummy flag to trigger servo phase
+        self.docking_id=None
+        self.setting_opt_goal = False       # Flag to avoid sending goals while multi goal pose sending takes place
+        self.MIN_INTERVAL = 1.0
+        self.last_callback_time = None
         
+        # ------------------------------------------------------------
+        # Service clients to read parameters from ultralytics_ros (important to have this before the callbacks)
+        # ------------------------------------------------------------
+        self.get_params_cli = self.create_client(GetParameters, "/tracker_with_cloud_node/get_parameters")
+        while not self.get_params_cli.wait_for_service(timeout_sec=2.0):
+            self.get_logger().info("Waiting for 'tracker_with_cloud_node' service...")
+        self.get_logger().info("'tracker_with_cloud_node' service client ready!")
+        
+        future = self.get_params_cli.call_async(GetParameters.Request(names=["GOAL"]))
+        rclpy.spin_until_future_complete(self, future)
+        if future.result() is not None:
+            self.docking_id = future.result().values[0].string_value
+        else:
+            self.get_logger().error("Failed to get docking_id parameter. Shutting down.")
+            rclpy.shutdown()
+            raise SystemExit("Failed to get docking_id parameter.")
+
+
         # Publishers
         self.polygon_pub = self.create_publisher(Marker, 'table_polygon', 1)
         self.padded_line_marker_pub = self.create_publisher(Marker, '/padded_line', 1)
@@ -106,14 +144,6 @@ class PlaneCloudProcessorNode(Node):
         while not self.plan_cli.wait_for_service(timeout_sec=2.0):
             self.get_logger().info("Waiting for 'multi_goal_plan' service...")
         self.get_logger().info("'multi_goal_plan' service client ready!")
-
-        # ------------------------------------------------------------
-        # Service clients to read parameters from ultralytics_ros
-        # ------------------------------------------------------------
-        self.get_params_cli = self.create_client(GetParameters, "/tracker_with_cloud_node/get_parameters")
-        while not self.get_params_cli.wait_for_service(timeout_sec=2.0):
-            self.get_logger().info("Waiting for 'tracker_with_cloud_node' service...")
-        self.get_logger().info("'tracker_with_cloud_node' service client ready!")
 
         # ------------------------------------------------------------
         # Service clients to manage the servo mode
@@ -212,21 +242,6 @@ class PlaneCloudProcessorNode(Node):
         self.navigate_to_pose_client =  ActionClient(self, NavigateToPose, 'navigate_to_pose')
         self._cancel_rviz_goals_client = self.create_client(CancelGoal, 'navigate_to_pose/_action/cancel_goal')
 
-        # ------------------------------------------------------------
-        #Auxuliar variables
-        #-------------------------------------------------------------
-
-        self.can_trig_init=True
-        self.can_assess_init=False
-        self.phase3_triggered = False # prevents moving from phase3 to phase 2
-        self.phase2_skip = False # make phase3 to read plane cloud once
-        self.phase3_skip= False
-        self.coll_cloud_pts = []
-        self.coll_pts_calls = 0
-        self.debug_collision= True
-        self.rviz_goal_cancelled = False # dummy flag to trigger servo phase
-        self.docking_id="59"
-
         #------------------------------------------
         # Erase every marker in rviz
         #------------------------------------------
@@ -239,22 +254,42 @@ class PlaneCloudProcessorNode(Node):
         # Docking parameters for each target
         #------------------------------------------------------------
 
-        self.docking_params = {"59": {"min_edge":1.4 ,
+        self.docking_params = {"59": {"min_edge":1.4 ,   #Bed
                                       "near_start": 0.2,
                                       "near_end": 0.2,
                                       "yaw": 145.0 ,
                                       "pad_edge": 0.72,
                                       "wheelc_dim": [0.3, 0.8, 0.8],
                                        "p3_thr_r": 4,
-                                       "cr": 2.2}, #2.5 , 1.3
-                                "60": {"min_edge":0.2 , 
+                                       "cr": 2.2, #2.5 , 1.3
+                                       "ws_type": "linear"}, 
+                                "60": {"min_edge":0.2 ,  #Table
                                        "near_start": 0.1,
                                        "near_end": 0.1,
                                        "yaw": 90.0,
                                        "pad_edge": 0.87,
                                        "wheelc_dim": [0.3, 0.8, 0.9],
                                        "p3_thr_r": 2.5,
-                                       "cr": 1.75},
+                                       "cr": 1.75,
+                                       "ws_type": "linear"},
+                                "72": {"min_edge":0.2 ,  #Fridge
+                                       "yaw": 90.0,
+                                       "radius": 0.9,
+                                       "wheelc_dim": [0.3, 0.8, 0.9],
+                                       "p3_thr_r": 2.5,
+                                       "rel_yaw": 3.14,
+                                       "centering": "Right Frontal Vertex",
+                                       "cr": 1.75,
+                                       "ws_type": "arch"},
+                                "62": {"min_edge":0.2 ,   #TV 62
+                                       "yaw": 90.0,
+                                       "radius": 1.75,
+                                       "wheelc_dim": [0.3, 0.8, 0.9],
+                                       "p3_thr_r": 4.0,
+                                       "rel_yaw": 1.57,
+                                       "centering": "Mid Front",
+                                       "cr": 1.85,
+                                       "ws_type": "arch"},
         } #pad edge 0.83
 
 
@@ -340,9 +375,20 @@ class PlaneCloudProcessorNode(Node):
     def plane_cloud_callback(self, plane_cloud_msg):
         self.get_logger().info("Received plane_cloud")
         plane_cloud = self.convert_cloud_to_array(plane_cloud_msg)
+        
+        now = self.get_clock().now()
+        if self.last_callback_time is not None:
+            elapsed = (now - self.last_callback_time).nanoseconds / 1e9
+            if elapsed < self.MIN_INTERVAL:
+                return  # too soon, skip
+    
+        self.last_callback_time = now
 
         future= self.get_params_cli.call_async(GetParameters.Request(names=["GOAL"]))
         future.add_done_callback(self.get_params_callback)
+
+        if self.setting_opt_goal:
+            return
 
         if plane_cloud is None or len(plane_cloud) == 0:
             self.get_logger().warn("Empty plane cloud.")
@@ -514,14 +560,28 @@ class PlaneCloudProcessorNode(Node):
             # 2) Publish polygon
             self.publish_polygon_marker(polygon_3d, plane_cloud_msg.header)
 
-            # 3) Build padded edges
-            padding_offset = self.docking_params[self.docking_id]["pad_edge"]
-            padded_edges = self.calculate_padded_edges(polygon_3d, padding_offset)
+            # 3) Build padded edges (modify this function to handle fridge docking)
+            if self.docking_params[self.docking_id]["ws_type"] == "linear":
+                padding_offset = self.docking_params[self.docking_id]["pad_edge"]
+                padded_edges = self.calculate_padded_edges(polygon_3d, padding_offset)
+                # 4) Find possible placements (PoseStamped)
+                location_sampling_distance = 0.1
+                possible_poses = self.find_possible_placements(padded_edges, location_sampling_distance)
+                
+            else:
+                radius_arch = self.docking_params[self.docking_id]["radius"]
+                center_arch = self.docking_params[self.docking_id]["centering"]
+                padded_edges = self.create_arch_polygon(polygon_3d,
+                                                        -distance_vector,
+                                                        radius_arch,
+                                                        center=center_arch)
+                # 4) Find possible placements (PoseStamped)
+                location_sampling_distance = 0.1
+                possible_poses = self.find_possible_placements_circle(padded_edges, location_sampling_distance, distance_vector,self.docking_params[self.docking_id]["rel_yaw"])
+
             self.publish_padded_lines(padded_edges, plane_cloud_msg.header)
 
-            # 4) Find possible placements (PoseStamped)
-            location_sampling_distance = 0.1
-            possible_poses = self.find_possible_placements(padded_edges, location_sampling_distance)
+            
 
             # 5) Collision filtering
             if self.scene_tree is not None:
@@ -583,9 +643,20 @@ class PlaneCloudProcessorNode(Node):
         avg_height = np.mean(cloud[:, 2])
         #hull_points = cv2.convexHull(points_2d)
         best_fitting_box= cv2.minAreaRect(points_2d)
+
+        if best_fitting_box[1][0] < 0.1:
+            bw = 0.1
+        else:
+            bw = best_fitting_box[1][0]
+        if best_fitting_box[1][1] < 0.1:
+            bh = 0.1
+        else:
+            bh = best_fitting_box[1][1]
+        best_fitting_box= (best_fitting_box[0],(bw,bh),best_fitting_box[2])
         hull_points = cv2.boxPoints(best_fitting_box)
-        epsilon = 0.05 * cv2.arcLength(hull_points, True)
+        epsilon = 0#0.05 * cv2.arcLength(hull_points, True)
         approx_polygon = cv2.approxPolyDP(hull_points, epsilon, True)
+        
         polygon_3d = [np.array([pt[0][0], pt[0][1], avg_height]) for pt in approx_polygon]
         return polygon_3d
 
@@ -615,7 +686,7 @@ class PlaneCloudProcessorNode(Node):
 
     #     return circle_points
 
-    def create_circle_polygon(self, center, radius, num_segments=36):
+    def create_circle_polygon(self, center, radius, num_segments=36, arange= 6.28, aref=0):
         """
         Create a list of line segments forming a circle
         in the horizontal plane at z = center[2], 
@@ -624,6 +695,8 @@ class PlaneCloudProcessorNode(Node):
         :param center: [cx, cy, cz], the center of the circle
         :param radius: float, the desired radius of the circle
         :param num_segments: int, how many segments to approximate the circle
+        :param arange: float (0 to 2pi), poly angular range, 2pi is a circle, less ang is an arch
+        :param aref: float (0 to 2pi), starting ang to build and arch, this var is irrelevant for building circles
         :return: List of edges, where each edge is [[x1, y1, z1], [x2, y2, z2]]
         """
         import math
@@ -631,20 +704,21 @@ class PlaneCloudProcessorNode(Node):
         cx, cy, cz = center[0], center[1], center[2]
 
         # Generate the points around the circle
-        angle_step = 2.0 * math.pi / num_segments
+        angle_step = arange/ (num_segments)
         circle_points = []
-        for i in range(num_segments):
+        for i in range(num_segments+1):
             theta = i * angle_step
-            x = cx + radius * math.cos(theta)
-            y = cy + radius * math.sin(theta)
+            x = cx + radius * math.cos(theta+aref-arange/2)
+            y = cy + radius * math.sin(theta+aref-arange/2)
             z = cz
             circle_points.append([x, y, z])
+        
 
         # Convert the consecutive points into edges
         # e.g. [pt0->pt1, pt1->pt2, ..., pt(n-1)->pt0]
         for i in range(num_segments):
             p1 = circle_points[i]
-            p2 = circle_points[(i + 1) % num_segments]  # wrap around
+            p2 = circle_points[(i + 1)]  
             circle_edges.append([p1, p2])
 
         return circle_edges
@@ -727,6 +801,39 @@ class PlaneCloudProcessorNode(Node):
                 ])
         return padded_edges
 
+    ###########################################################################
+    # 1) Expanded arch workspace
+    ###########################################################################
+    def create_arch_polygon(self, polygon, distance_vector, radius, arange = np.pi/6 , center="Mid Front" , num_segments=36):
+        """
+        Returns a list of edges, each edge is [ [x1, y1, z1], [x2, y2, z2] ].
+        """
+        # Copy + close
+        polygon_copy = np.array(polygon[:])
+        #polygon_copy.append(polygon_copy[0])
+
+        # 2D center
+        contour_2d = [np.array([pt[0], pt[1]]) for pt in polygon_copy[:-1]]
+        contour_center = np.mean(polygon_copy, axis=0)
+        local_corners =  polygon_copy - contour_center.reshape(1,-1)
+
+        angle_TR = np.degrees(np.arctan2(distance_vector[1], distance_vector[0]))
+        corner_theta =  [(np.degrees(np.arctan2(pt[1], pt[0])) - angle_TR + 360.0) % 360.0 for pt in local_corners]
+
+        sorted_theta = sorted(corner_theta, key=lambda x: x)
+        sorted_theta_ind = [corner_theta.index(t) for t in sorted_theta]
+        print(sorted_theta_ind)
+        sorted_polygon= polygon_copy[sorted_theta_ind]
+        if center == "Centroid":
+            c = np.mean(polygon_copy, axis=0)
+        elif center == "Right Frontal Vertex":
+            c =  sorted_polygon[0]
+        if center == "Mid Front":
+            c = np.mean(sorted_polygon[[0,-1]], axis=0)
+        ang_ref = np.radians (angle_TR+ (sorted_theta[0] + sorted_theta[-1])/2-180)
+        return self.create_circle_polygon(c, radius , arange = arange , aref = ang_ref,num_segments=6)
+
+
 
     def publish_padded_lines(self, padded_edges, header):
         marker = Marker()
@@ -763,7 +870,7 @@ class PlaneCloudProcessorNode(Node):
     ###########################################################################
     # 2) Compute orientation from nearest edge
     ###########################################################################
-    def compute_orientation_from_nearest_edge(self, point_3d, padded_edges):
+    def compute_orientation_from_nearest_edge(self, point_3d, padded_edges, yaw_rel = 1.57):
         best_dist = float('inf')
         best_line_dir = None
         p_xy = np.array(point_3d[:2], dtype=np.float32)
@@ -789,7 +896,8 @@ class PlaneCloudProcessorNode(Node):
         if best_line_dir is None:
             return Quaternion(w=1.0)
 
-        perp = np.array([-best_line_dir[1], best_line_dir[0]])
+        perp = np.array([best_line_dir[0]*np.cos(yaw_rel)-best_line_dir[1]*np.sin(yaw_rel),
+                         best_line_dir[0]*np.sin(yaw_rel)+best_line_dir[1]*np.cos(yaw_rel)])
         yaw = np.arctan2(perp[1], perp[0])
         q = tf_transformations.quaternion_from_euler(0, 0, yaw)
         return Quaternion(x=q[0], y=q[1], z=q[2], w=q[3])
@@ -798,7 +906,7 @@ class PlaneCloudProcessorNode(Node):
     ###########################################################################
     # 3) Sample edges -> list-of-lists of PoseStamped
     ###########################################################################
-    def find_possible_placements_circle(self, padded_edges, location_sampling_distance, distance_vector):
+    def find_possible_placements_circle(self, padded_edges, location_sampling_distance, distance_vector , yaw_rel= 1.57):
         skip_distance = 0.0
         all_clusters = []
 
@@ -840,9 +948,9 @@ class PlaneCloudProcessorNode(Node):
                 
                 print(f"Cosine of angle {cos_alfa:.2f}")
 
-                if (dot_product < 0) and (abs(cos_alfa) > 0.86):  # cos(30 degrees) = 0.86
+                if True: #(dot_product < 0) and (abs(cos_alfa) > 0.86):  # cos(30 degrees) = 0.86
 
-                    q = self.compute_orientation_from_nearest_edge(sample_xyz, padded_edges)
+                    q = self.compute_orientation_from_nearest_edge(sample_xyz, padded_edges,yaw_rel)
 
                     pose_stamped = PoseStamped()
                     pose_stamped.header.frame_id = 'map'  # these are in map frame
@@ -1380,6 +1488,7 @@ class PlaneCloudProcessorNode(Node):
 
         # We need to pass data (candidate_goals, corners, etc.) to the callback.
         # We'll use a lambda to "capture" these values.
+        
         future.add_done_callback(
             lambda fut: self.handle_plan_response(fut, candidate_goals, goal_corners_map)
         )
@@ -1438,6 +1547,7 @@ class PlaneCloudProcessorNode(Node):
 
             # Finally, you can publish or store the best pose here:
             self.publish_best_point(best_pose, ...)
+            self.setting_opt_goal = False
 
         except Exception as e:
             self.get_logger().error(f"Service call failed: {str(e)}")
@@ -1611,11 +1721,12 @@ class PlaneCloudProcessorNode(Node):
         goal_msg = NavigateToPose.Goal()
         goal_msg.pose = pose_msg
 
-        
         self.cancel_goal(g_msg=goal_msg) 
 
     def goal_response_callback(self, future):
         goal_handle = future.result()
+        self.setting_opt_goal = False
+
         if not goal_handle.accepted:
             self.get_logger().warn('Goal was rejected.')
             return
@@ -1625,23 +1736,28 @@ class PlaneCloudProcessorNode(Node):
 
     def cancel_goal(self,g_msg=None):
         self.get_logger().info('Cancel command received.')
+        
+        if self.setting_opt_goal:
+            return
 
-        if self._goal_handle:
+        self.setting_opt_goal = True
 
+        if self._goal_handle: 
             self.get_logger().info('Attempting to cancel the current goal...')
-            cancel_future = self._goal_handle.cancel_goal_async()           
+            cancel_future = self._goal_handle.cancel_goal_async()  
+            self._goal_handle=None         
             # Inline callback for cancellation result
             def cancel_done_callback(fut):
                 result = fut.result()
                 if len(result.goals_canceling) > 0:
                     self.get_logger().info('Goal successfully cancelled.')
-                    self._goal_handle=None
                     if g_msg:
                         # Add goal once the cancelation is confirmed
                         future = self.navigate_to_pose_client.send_goal_async(g_msg)
                         future.add_done_callback(self.goal_response_callback)
                 else:
                     self.get_logger().warn('Goal cancel failed or no goal was active.')
+                    self.setting_opt_goal = False
 
             cancel_future.add_done_callback(cancel_done_callback)
         else:
@@ -1650,6 +1766,8 @@ class PlaneCloudProcessorNode(Node):
             if g_msg:
                 future = self.navigate_to_pose_client.send_goal_async(g_msg)
                 future.add_done_callback(self.goal_response_callback)
+            else:
+                self.setting_opt_goal = False #Inmediately free up successive cancel attemps
 
     def cancel_rviz_goal(self,filtered_poses_circl,circle_polygon_3):
         self.get_logger().info('Attempting to cancel the current rviz goal...')
