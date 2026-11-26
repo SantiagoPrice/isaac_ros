@@ -2,3 +2,7 @@
 	path = isaac_ros_ws/src/isaac_ros_object_detection
 	url = https://github.com/robot-Yang/isaac_ros_object_detection.git
 	branch = release-3.2
+[submodule "isaac_ros_ws/src/livox_ros_driver2"]
+	path = isaac_ros_ws/src/livox_ros_driver2
+	url = https://github.com/SantiagoPrice/livox_ros_driver2.git
+	branch = master
