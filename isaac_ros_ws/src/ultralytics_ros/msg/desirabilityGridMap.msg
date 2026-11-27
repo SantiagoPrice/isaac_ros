@@ -1,1 +1,0 @@
-nav_msgs/OccupancyGrid[] desirability_maps
